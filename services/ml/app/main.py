@@ -1,14 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 import numpy as np, cv2
-from .quality import blur_level, lighting_level, angle_ok
+from .quality import blur_level, lighting_level
 from .model import model
+from .roi import extract_skin_roi, pose_quality_from_landmarks
 
-app = FastAPI(title="SkinGuide ML", version="0.1.0")
-
-FACE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+app = FastAPI(title="SkinGuide ML", version="0.2.0")
 
 @app.post("/infer")
-async def infer(image: UploadFile = File(...)):
+async def infer(
+    image: UploadFile = File(...),
+    x_return_roi: str | None = Header(default=None),  # set "1" to include ROI jpeg b64
+):
     if image.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(400, "JPG/PNG only")
 
@@ -18,19 +20,37 @@ async def infer(image: UploadFile = File(...)):
     if img is None:
         raise HTTPException(400, "Bad image")
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = FACE.detectMultiScale(gray, 1.1, 5, minSize=(120, 120))
-    face_bbox = faces[0] if len(faces) else None
+    # Extract skin ROI (face oval minus eyes/lips)
+    roi_pack = extract_skin_roi(img)
+    if roi_pack is None:
+        raise HTTPException(422, "Unable to isolate face/skin ROI. Try better lighting, straight-on angle.")
+
+    roi_bgr, bbox, roi_jpeg_b64, roi_sha = roi_pack
+
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
 
     quality = {
         "lighting": lighting_level(gray),
         "blur": blur_level(gray),
-        "angle": angle_ok(face_bbox),
-        "makeup_suspected": False,  # placeholder (hard problem; do later)
+        "angle": pose_quality_from_landmarks(img),
+        "makeup_suspected": False,  # later (heuristics + ML)
     }
 
-    attributes = model.infer(img)
-    return {"quality": quality, "attributes": attributes, "model_version": model.version}
+    # Infer attributes using ROI only
+    attributes = model.infer(roi_bgr)
+
+    resp = {
+        "quality": quality,
+        "attributes": attributes,
+        "model_version": model.version,
+        "roi_bbox": {"x": bbox[0], "y": bbox[1], "w": bbox[2], "h": bbox[3]},
+        "roi_sha256": roi_sha,
+    }
+
+    if x_return_roi == "1":
+        resp["roi_jpeg_b64"] = roi_jpeg_b64
+
+    return resp
 
 @app.get("/health")
 def health():
