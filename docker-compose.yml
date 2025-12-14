@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: skinguide
+      POSTGRES_PASSWORD: skinguide
+      POSTGRES_DB: skinguide
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  ml:
+    build: ./services/ml
+    environment:
+      MODEL_VERSION: "0.1.0-mvp"
+      TORCH_MODEL_PATH: "/models/model.pt"
+    ports: ["8001:8001"]
+
+  api:
+    build: ./services/api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://skinguide:skinguide@postgres:5432/skinguide"
+      REDIS_URL: "redis://redis:6379/0"
+      ML_URL: "http://ml:8001/infer"
+      # Default privacy stance: do NOT store images
+      STORE_IMAGES_DEFAULT: "false"
+      # Optional demo: if true AND user opted-in, store ROI image on disk
+      STORE_IMAGES_ENABLED: "true"
+      IMAGE_STORE_DIR: "/data/images"
+      SESSION_SECRET: "dev-change-me"
+      RATE_LIMIT_PER_MIN: "20"
+      MAX_IMAGE_MB: "6"
+    ports: ["8000:8000"]
+    depends_on: [postgres, redis, ml]
+    volumes:
+      - apiimages:/data/images
+
+volumes:
+  pgdata:
+  apiimages:
