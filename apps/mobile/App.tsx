@@ -1,3 +1,5 @@
+// apps/mobile/App.tsx
+
 import React, { useEffect, useState } from "react";
 import { SafeAreaView, View, Text, Pressable } from "react-native";
 import { defaultState } from "./src/state";
@@ -7,8 +9,9 @@ import CameraScreen from "./src/screens/CameraScreen";
 import ReviewScreen from "./src/screens/ReviewScreen";
 import ResultsScreen from "./src/screens/ResultsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
+import LabelScreen from "./src/screens/LabelScreen";
 
-type Screen = "consent" | "camera" | "review" | "results" | "settings";
+type Screen = "consent" | "camera" | "review" | "results" | "settings" | "label";
 
 export default function App() {
   const [st, setSt] = useState(defaultState);
@@ -32,6 +35,8 @@ export default function App() {
       </SafeAreaView>
     );
   }
+
+  const roiSha: string | null = result?.roi_sha256 ?? null;
 
   return (
     <SafeAreaView style={{ flex: 1, padding: 16 }}>
@@ -82,15 +87,23 @@ export default function App() {
             setPhotoUri(null);
             setScreen("camera");
           }}
+          onLabelScan={() => setScreen("label")}
+          canLabel={!!roiSha}
+        />
+      )}
+
+      {screen === "label" && roiSha && (
+        <LabelScreen
+          apiBaseUrl={st.apiBaseUrl}
+          sessionId={st.sessionId}
+          roiSha256={roiSha}
+          onBack={() => setScreen("results")}
+          onDone={() => setScreen("results")}
         />
       )}
 
       {screen === "settings" && (
-        <SettingsScreen
-          apiBaseUrl={st.apiBaseUrl}
-          sessionId={st.sessionId}
-          onBack={() => setScreen("consent")}
-        />
+        <SettingsScreen apiBaseUrl={st.apiBaseUrl} sessionId={st.sessionId} onBack={() => setScreen("consent")} />
       )}
     </SafeAreaView>
   );
