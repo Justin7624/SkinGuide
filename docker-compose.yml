@@ -47,13 +47,40 @@ services:
       MODEL_CURRENT_PT_PATH: "/models/current/model.pt"
 
       RATE_LIMIT_PER_MIN: "20"
+      RATE_LIMIT_FAIL_OPEN: "true"
+
       MAX_IMAGE_MB: "6"
+      MAX_IMAGE_PIXELS: "12000000"
+      MIN_IMAGE_DIM: "320"
+      MAX_IMAGE_DIM: "4096"
+
+      PROGRESS_RETENTION_DAYS: "180"
+      WITHDRAWN_DONATION_RETENTION_DAYS: ""  # empty = keep forever (default)
     ports: ["8000:8000"]
     depends_on: [postgres, redis, ml]
     volumes:
       - apiimages:/data/images
       - apidonations:/data/donations
       - modelshare:/models
+
+  janitor:
+    build: ./services/api
+    environment:
+      DATABASE_URL: "postgresql+psycopg://skinguide:skinguide@postgres:5432/skinguide"
+      REDIS_URL: "redis://redis:6379/0"
+      ML_URL: "http://ml:8001/infer"
+      STORAGE_BACKEND: "local"
+      SESSION_SECRET: "dev-change-me"
+
+      PROGRESS_RETENTION_DAYS: "180"
+      WITHDRAWN_DONATION_RETENTION_DAYS: ""  # keep unless you set a number
+      JANITOR_SLEEP_SECONDS: "21600"         # 6 hours
+    depends_on: [postgres]
+    volumes:
+      - apiimages:/data/images
+      - apidonations:/data/donations
+      - modelshare:/models
+    command: ["python", "-m", "app.janitor_runner"]
 
   trainer:
     build: ./services/trainer
@@ -63,7 +90,7 @@ services:
       ADMIN_API_KEY: "dev-admin-change-me"
       PUBLISH: "true"
       MODEL_ARTIFACTS_DIR: "/models/artifacts"
-      NEXT_MODEL_VERSION: "0.5.0-auto"
+      NEXT_MODEL_VERSION: "0.6.0-auto"
       EPOCHS: "8"
       BATCH_SIZE: "16"
       IMG_SIZE: "128"
