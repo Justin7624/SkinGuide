@@ -58,4 +58,14 @@ class Settings(BaseSettings):
     PROGRESS_RETENTION_DAYS: int = 180
     WITHDRAWN_DONATION_RETENTION_DAYS: int | None = None
 
+    # -------------------------
+    # Labeling consensus tuning
+    # -------------------------
+    LABEL_CONSENSUS_N: int = 2  # set to 3 for 3-labeler consensus
+    LABEL_MEAN_ABS_DIFF_MAX: float = 0.35
+    LABEL_MAX_ABS_DIFF_MAX: float = 0.60
+
+    # IRR stats compute cap
+    IRR_MAX_SAMPLES: int = 5000
+
 settings = Settings()
