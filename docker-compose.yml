@@ -17,8 +17,10 @@ services:
     build: ./services/ml
     environment:
       MODEL_VERSION: "0.1.0-mvp"
-      TORCH_MODEL_PATH: "/models/model.pt"
+      TORCH_MODEL_PATH: "/models/current/model.pt"
     ports: ["8001:8001"]
+    volumes:
+      - modelshare:/models/current
 
   api:
     build: ./services/api
@@ -27,16 +29,19 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       ML_URL: "http://ml:8001/infer"
 
-      # Progress storage (ROI-only). Default is no storage unless user opts in.
       STORE_IMAGES_DEFAULT: "false"
       STORE_IMAGES_ENABLED: "true"
-      IMAGE_STORE_DIR: "/data/images"
-
-      # Donation storage (ROI-only). Default OFF unless user opts in.
       DONATION_STORAGE_ENABLED: "true"
-      DONATION_STORE_DIR: "/data/donations"
+
+      STORAGE_BACKEND: "local"
 
       SESSION_SECRET: "dev-change-me"
+      ADMIN_API_KEY: "dev-admin-change-me"
+
+      MODEL_SHARED_DIR: "/models/current"
+      MODEL_CURRENT_MANIFEST_PATH: "/models/current/manifest.json"
+      MODEL_CURRENT_PT_PATH: "/models/current/model.pt"
+
       RATE_LIMIT_PER_MIN: "20"
       MAX_IMAGE_MB: "6"
     ports: ["8000:8000"]
@@ -44,8 +49,10 @@ services:
     volumes:
       - apiimages:/data/images
       - apidonations:/data/donations
+      - modelshare:/models/current
 
 volumes:
   pgdata:
   apiimages:
   apidonations:
+  modelshare:
