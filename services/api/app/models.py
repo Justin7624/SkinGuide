@@ -60,6 +60,7 @@ class DonatedSample(Base):
     roi_image_path: Mapped[str] = mapped_column(String)
     metadata_json: Mapped[str] = mapped_column(Text)
 
+    # FINAL consensus output (trainer consumes this)
     labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     labeled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -67,6 +68,7 @@ class DonatedSample(Base):
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="donations")
+    label_submissions: Mapped[list["DonatedSampleLabel"]] = relationship(back_populates="donated_sample")
 
 
 class ModelArtifact(Base):
@@ -104,9 +106,22 @@ class AuditEvent(Base):
 
     event_type: Mapped[str] = mapped_column(String, index=True)
 
+    # End-user session (if applicable)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    # Request meta
     request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    path: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    method: Mapped[str | None] = mapped_column(String, nullable=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Actor meta (hardened)
+    actor_type: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # "admin" | "user"
+    admin_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    admin_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -136,6 +151,7 @@ class AdminUser(Base):
 
     sessions: Mapped[list["AdminSession"]] = relationship(back_populates="user")
     resets: Mapped[list["AdminPasswordReset"]] = relationship(back_populates="user")
+    labels: Mapped[list["DonatedSampleLabel"]] = relationship(back_populates="admin_user")
 
 
 class AdminSession(Base):
@@ -174,3 +190,35 @@ class AdminPasswordReset(Base):
     user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
 
     user: Mapped["AdminUser"] = relationship(back_populates="resets")
+
+
+# --------------------------
+# Label submissions (consensus)
+# --------------------------
+
+class DonatedSampleLabel(Base):
+    __tablename__ = "donated_sample_labels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    donated_sample_id: Mapped[int] = mapped_column(Integer, ForeignKey("donated_samples.id"), index=True)
+    admin_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_users.id"), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    # Quick filter for skip vs label
+    is_skip: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    # Raw submission:
+    # {
+    #   "labels": {k: score0to1},
+    #   "region_labels": { "forehead": {k: score0to1}, ... },
+    #   "fitzpatrick": "...",
+    #   "age_band": "...",
+    #   "skipped": true/false,
+    #   "reason": "...",
+    # }
+    labels_json: Mapped[str] = mapped_column(Text)
+
+    donated_sample: Mapped["DonatedSample"] = relationship(back_populates="label_submissions")
+    admin_user: Mapped["AdminUser"] = relationship(back_populates="labels")
