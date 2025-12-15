@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, date
-from typing import Dict, Iterable, Optional, List, Tuple
+from typing import Dict, Iterable
 import csv
 import io
 import json
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy import func, desc
 
 from .db import get_db
-from .security import require_admin
+from .security import require_role
 from . import models
 from .schemas_admin import (
     AdminSummary, AdminAuditEvent, AdminAuditPage,
@@ -22,39 +22,21 @@ from .schemas_admin import (
     ModelTable, ModelRow
 )
 
-router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(require_admin)])
-
-# --------------------------
-# helpers
-# --------------------------
-
-def _to_day(dt: datetime) -> date:
-    return dt.date()
+router = APIRouter(prefix="/v1/admin", tags=["admin"], dependencies=[Depends(require_role("viewer"))])
 
 def _parse_yyyy_mm_dd(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 def _date_range(days: int | None, start: str | None, end: str | None) -> tuple[date, date]:
-    """
-    Returns (start_date, end_date) inclusive.
-    Defaults: last N days ending today (N=30).
-    """
     today = datetime.utcnow().date()
-    if end:
-        end_d = _parse_yyyy_mm_dd(end)
-    else:
-        end_d = today
-
+    end_d = _parse_yyyy_mm_dd(end) if end else today
     if start:
         start_d = _parse_yyyy_mm_dd(start)
     else:
-        d = int(days or 30)
-        d = max(1, min(d, 365))
+        d = max(1, min(int(days or 30), 365))
         start_d = end_d - timedelta(days=d - 1)
-
     if start_d > end_d:
         start_d, end_d = end_d, start_d
-
     return start_d, end_d
 
 def _make_day_index(start_d: date, end_d: date) -> list[date]:
@@ -65,31 +47,22 @@ def _make_day_index(start_d: date, end_d: date) -> list[date]:
         cur = cur + timedelta(days=1)
     return out
 
-def _fill_series(day_idx: list[date], counts: Dict[date, int]) -> list[TimePoint]:
-    return [TimePoint(date=d.isoformat(), value=int(counts.get(d, 0))) for d in day_idx]
-
 def _group_count_by_day(q_rows: Iterable[tuple]) -> Dict[date, int]:
-    """
-    Expects rows like [(date_obj, count), ...]
-    """
     out: Dict[date, int] = {}
     for d, n in q_rows:
         if d is None:
             continue
-        # SQL date may come as datetime/date depending on DB
-        if isinstance(d, datetime):
-            dd = d.date()
-        else:
-            dd = d
+        dd = d.date() if isinstance(d, datetime) else d
         out[dd] = int(n or 0)
     return out
+
+def _fill_series(day_idx: list[date], counts: Dict[date, int]) -> list[TimePoint]:
+    return [TimePoint(date=d.isoformat(), value=int(counts.get(d, 0))) for d in day_idx]
 
 def _breakdown(rows: Iterable[tuple], limit: int = 20) -> Breakdown:
     items = []
     for k, v in rows:
-        if k is None:
-            k = "unknown"
-        items.append(BreakdownItem(key=str(k), value=int(v or 0)))
+        items.append(BreakdownItem(key=str(k if k is not None else "unknown"), value=int(v or 0)))
     items = sorted(items, key=lambda x: x.value, reverse=True)[:limit]
     return Breakdown(items=items)
 
@@ -100,17 +73,11 @@ def _csv_stream(header: list[str], rows: Iterable[list[str]]) -> StreamingRespon
         w.writerow(header)
         yield buf.getvalue()
         buf.seek(0); buf.truncate(0)
-
         for r in rows:
             w.writerow(r)
             yield buf.getvalue()
             buf.seek(0); buf.truncate(0)
-
     return StreamingResponse(gen(), media_type="text/csv")
-
-# --------------------------
-# summary + audit
-# --------------------------
 
 @router.get("/summary", response_model=AdminSummary)
 def summary(db: OrmSession = Depends(get_db)):
@@ -175,21 +142,15 @@ def summary(db: OrmSession = Depends(get_db)):
     )
 
 @router.get("/audit", response_model=AdminAuditPage)
-def audit(
-    before_id: int | None = None,
-    limit: int = 100,
-    db: OrmSession = Depends(get_db),
-):
+def audit(before_id: int | None = None, limit: int = 100, db: OrmSession = Depends(get_db)):
     limit = max(1, min(int(limit), 500))
-
     q = db.query(models.AuditEvent).order_by(desc(models.AuditEvent.id))
     if before_id is not None:
         q = q.filter(models.AuditEvent.id < int(before_id))
 
     rows = q.limit(limit).all()
-    items: list[AdminAuditEvent] = []
-    for r in rows:
-        items.append(AdminAuditEvent(
+    items: list[AdminAuditEvent] = [
+        AdminAuditEvent(
             id=r.id,
             created_at=r.created_at.isoformat(),
             event_type=r.event_type,
@@ -197,26 +158,22 @@ def audit(
             request_id=r.request_id,
             client_ip=r.client_ip,
             payload_json=r.payload_json,
-        ))
-
+        )
+        for r in rows
+    ]
     next_before = items[-1].id if items else None
     return AdminAuditPage(items=items, next_before_id=next_before)
-
-# --------------------------
-# UI-ready metrics for charts
-# --------------------------
 
 @router.get("/metrics", response_model=AdminMetricsResponse)
 def metrics(
     days: int | None = Query(default=30, ge=1, le=365),
-    start: str | None = Query(default=None, description="YYYY-MM-DD"),
-    end: str | None = Query(default=None, description="YYYY-MM-DD"),
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
     db: OrmSession = Depends(get_db),
 ):
     start_d, end_d = _date_range(days, start, end)
     day_idx = _make_day_index(start_d, end_d)
 
-    # Sessions per day
     sess_rows = (
         db.query(func.date(models.Session.created_at), func.count(models.Session.id))
         .filter(models.Session.created_at >= datetime.combine(start_d, datetime.min.time()))
@@ -226,7 +183,6 @@ def metrics(
     )
     sess_counts = _group_count_by_day(sess_rows)
 
-    # Analyzes completed per day (audit_events)
     an_rows = (
         db.query(func.date(models.AuditEvent.created_at), func.count(models.AuditEvent.id))
         .filter(models.AuditEvent.event_type == "analyze_completed")
@@ -237,7 +193,6 @@ def metrics(
     )
     an_counts = _group_count_by_day(an_rows)
 
-    # Donations created per day
     don_rows = (
         db.query(func.date(models.DonatedSample.created_at), func.count(models.DonatedSample.id))
         .filter(models.DonatedSample.created_at >= datetime.combine(start_d, datetime.min.time()))
@@ -247,7 +202,6 @@ def metrics(
     )
     don_counts = _group_count_by_day(don_rows)
 
-    # Withdrawn per day (by withdrawn_at)
     wd_rows = (
         db.query(func.date(models.DonatedSample.withdrawn_at), func.count(models.DonatedSample.id))
         .filter(models.DonatedSample.is_withdrawn == True)  # noqa: E712
@@ -259,7 +213,6 @@ def metrics(
     )
     wd_counts = _group_count_by_day(wd_rows)
 
-    # Labels created per day (labeled_at)
     lab_rows = (
         db.query(func.date(models.DonatedSample.labeled_at), func.count(models.DonatedSample.id))
         .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
@@ -271,7 +224,6 @@ def metrics(
     )
     lab_counts = _group_count_by_day(lab_rows)
 
-    # 24h breakdowns for dashboard widgets
     now = datetime.utcnow()
     last24 = now - timedelta(hours=24)
 
@@ -282,8 +234,6 @@ def metrics(
         .all()
     )
 
-    # model version breakdown based on audit payload_json (cheap substring parse)
-    # Note: payload_json is sanitized; includes model_version for analyze_completed.
     mv_rows = (
         db.query(models.AuditEvent.payload_json, func.count(models.AuditEvent.id))
         .filter(models.AuditEvent.event_type == "analyze_completed")
@@ -316,10 +266,6 @@ def metrics(
         model_version_breakdown_24h=_breakdown(mv_break, limit=20),
     )
 
-# --------------------------
-# Models table (UI-ready)
-# --------------------------
-
 @router.get("/models", response_model=ModelTable)
 def models_table(db: OrmSession = Depends(get_db)):
     rows = db.query(models.ModelArtifact).order_by(desc(models.ModelArtifact.created_at)).limit(200).all()
@@ -339,81 +285,33 @@ def models_table(db: OrmSession = Depends(get_db)):
         ],
     )
 
-# --------------------------
-# CSV Exports
-# --------------------------
-
+# CSV exports (unchanged behavior, now RBAC-protected)
 @router.get("/export/audit.csv")
-def export_audit_csv(
-    since_days: int | None = Query(default=7, ge=1, le=365),
-    limit: int = Query(default=200000, ge=1, le=500000),
-    db: OrmSession = Depends(get_db),
-):
+def export_audit_csv(since_days: int | None = Query(default=7, ge=1, le=365), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
     cutoff = datetime.utcnow() - timedelta(days=int(since_days or 7))
-    q = (
-        db.query(models.AuditEvent)
-        .filter(models.AuditEvent.created_at >= cutoff)
-        .order_by(desc(models.AuditEvent.id))
-        .limit(int(limit))
-    )
-
+    q = db.query(models.AuditEvent).filter(models.AuditEvent.created_at >= cutoff).order_by(desc(models.AuditEvent.id)).limit(int(limit))
     header = ["id", "created_at", "event_type", "session_id", "request_id", "client_ip", "payload_json"]
 
     def rows():
         for r in q:
-            yield [
-                str(r.id),
-                r.created_at.isoformat(),
-                r.event_type,
-                r.session_id or "",
-                r.request_id or "",
-                r.client_ip or "",
-                r.payload_json or "",
-            ]
-
+            yield [str(r.id), r.created_at.isoformat(), r.event_type, r.session_id or "", r.request_id or "", r.client_ip or "", r.payload_json or ""]
     return _csv_stream(header, rows())
 
 @router.get("/export/sessions.csv")
-def export_sessions_csv(
-    since_days: int | None = Query(default=30, ge=1, le=3650),
-    limit: int = Query(default=200000, ge=1, le=500000),
-    db: OrmSession = Depends(get_db),
-):
+def export_sessions_csv(since_days: int | None = Query(default=30, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
     cutoff = datetime.utcnow() - timedelta(days=int(since_days or 30))
-    q = (
-        db.query(models.Session)
-        .filter(models.Session.created_at >= cutoff)
-        .order_by(desc(models.Session.created_at))
-        .limit(int(limit))
-    )
+    q = db.query(models.Session).filter(models.Session.created_at >= cutoff).order_by(desc(models.Session.created_at)).limit(int(limit))
     header = ["id", "created_at", "has_device_binding"]
 
     def rows():
         for s in q:
-            yield [
-                s.id,
-                s.created_at.isoformat(),
-                "1" if (s.device_token_hash is not None) else "0",
-            ]
-
+            yield [s.id, s.created_at.isoformat(), "1" if (s.device_token_hash is not None) else "0"]
     return _csv_stream(header, rows())
 
 @router.get("/export/consents.csv")
-def export_consents_csv(
-    limit: int = Query(default=200000, ge=1, le=500000),
-    db: OrmSession = Depends(get_db),
-):
+def export_consents_csv(limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
     q = db.query(models.Consent).order_by(desc(models.Consent.updated_at)).limit(int(limit))
-    header = [
-        "session_id",
-        "store_progress_images",
-        "donate_for_improvement",
-        "accepted_privacy_version",
-        "accepted_terms_version",
-        "accepted_consent_version",
-        "accepted_at",
-        "updated_at",
-    ]
+    header = ["session_id","store_progress_images","donate_for_improvement","accepted_privacy_version","accepted_terms_version","accepted_consent_version","accepted_at","updated_at"]
 
     def rows():
         for c in q:
@@ -427,52 +325,27 @@ def export_consents_csv(
                 c.accepted_at.isoformat() if c.accepted_at else "",
                 c.updated_at.isoformat(),
             ]
-
     return _csv_stream(header, rows())
 
 @router.get("/export/donations.csv")
-def export_donations_csv(
-    since_days: int | None = Query(default=90, ge=1, le=3650),
-    limit: int = Query(default=200000, ge=1, le=500000),
-    db: OrmSession = Depends(get_db),
-):
+def export_donations_csv(since_days: int | None = Query(default=90, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
     cutoff = datetime.utcnow() - timedelta(days=int(since_days or 90))
-    q = (
-        db.query(models.DonatedSample)
-        .filter(models.DonatedSample.created_at >= cutoff)
-        .order_by(desc(models.DonatedSample.created_at))
-        .limit(int(limit))
-    )
-
-    header = [
-        "id", "session_id", "created_at",
-        "roi_sha256", "roi_image_path",
-        "is_withdrawn", "withdrawn_at",
-        "has_labels", "labeled_at",
-    ]
+    q = db.query(models.DonatedSample).filter(models.DonatedSample.created_at >= cutoff).order_by(desc(models.DonatedSample.created_at)).limit(int(limit))
+    header = ["id","session_id","created_at","roi_sha256","roi_image_path","is_withdrawn","withdrawn_at","has_labels","labeled_at"]
 
     def rows():
         for d in q:
             yield [
-                str(d.id),
-                d.session_id,
-                d.created_at.isoformat(),
-                d.roi_sha256,
-                d.roi_image_path,
+                str(d.id), d.session_id, d.created_at.isoformat(), d.roi_sha256, d.roi_image_path,
                 "1" if d.is_withdrawn else "0",
                 d.withdrawn_at.isoformat() if d.withdrawn_at else "",
                 "1" if (d.labels_json is not None) else "0",
                 d.labeled_at.isoformat() if d.labeled_at else "",
             ]
-
     return _csv_stream(header, rows())
 
 @router.get("/export/labels.csv")
-def export_labels_csv(
-    since_days: int | None = Query(default=365, ge=1, le=3650),
-    limit: int = Query(default=200000, ge=1, le=500000),
-    db: OrmSession = Depends(get_db),
-):
+def export_labels_csv(since_days: int | None = Query(default=365, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
     cutoff = datetime.utcnow() - timedelta(days=int(since_days or 365))
     q = (
         db.query(models.DonatedSample)
@@ -483,12 +356,7 @@ def export_labels_csv(
         .order_by(desc(models.DonatedSample.labeled_at))
         .limit(int(limit))
     )
-
-    header = [
-        "id", "roi_sha256", "session_id",
-        "labeled_at", "fitzpatrick", "age_band",
-        "labels_json",
-    ]
+    header = ["id","roi_sha256","session_id","labeled_at","fitzpatrick","age_band","labels_json"]
 
     def rows():
         for d in q:
@@ -501,36 +369,15 @@ def export_labels_csv(
                 age = str(j.get("age_band") or "")
             except Exception:
                 pass
-
-            yield [
-                str(d.id),
-                d.roi_sha256,
-                d.session_id,
-                d.labeled_at.isoformat() if d.labeled_at else "",
-                fitz,
-                age,
-                labels_json,
-            ]
-
+            yield [str(d.id), d.roi_sha256, d.session_id, d.labeled_at.isoformat() if d.labeled_at else "", fitz, age, labels_json]
     return _csv_stream(header, rows())
 
 @router.get("/export/models.csv")
-def export_models_csv(
-    limit: int = Query(default=10000, ge=1, le=100000),
-    db: OrmSession = Depends(get_db),
-):
+def export_models_csv(limit: int = Query(default=10000, ge=1, le=100000), db: OrmSession = Depends(get_db)):
     q = db.query(models.ModelArtifact).order_by(desc(models.ModelArtifact.created_at)).limit(int(limit))
-    header = ["version", "created_at", "is_active", "model_uri", "manifest_uri", "metrics_json"]
+    header = ["version","created_at","is_active","model_uri","manifest_uri","metrics_json"]
 
     def rows():
         for m in q:
-            yield [
-                m.version,
-                m.created_at.isoformat(),
-                "1" if m.is_active else "0",
-                m.model_uri,
-                m.manifest_uri,
-                m.metrics_json or "",
-            ]
-
+            yield [m.version, m.created_at.isoformat(), "1" if m.is_active else "0", m.model_uri, m.manifest_uri, m.metrics_json or ""]
     return _csv_stream(header, rows())
