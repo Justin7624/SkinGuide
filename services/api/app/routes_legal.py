@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy import desc
 
 from .db import get_db
-from .security import require_admin
+from .security import require_role
 from . import models
 from .schemas_legal import LegalDoc, LegalBundle, UpsertLegalDocRequest, UpsertLegalDocResponse, DocKey
 
@@ -49,7 +49,7 @@ def legal_doc(key: DocKey, db: OrmSession = Depends(get_db)):
         raise HTTPException(404, "Not found")
     return LegalDoc(key=key, version=d.version, effective_at=d.effective_at.isoformat(), body_markdown=d.body_markdown)
 
-@router.post("/upsert", dependencies=[Depends(require_admin)], response_model=UpsertLegalDocResponse)
+@router.post("/upsert", dependencies=[Depends(require_role("admin"))], response_model=UpsertLegalDocResponse)
 def upsert_legal(req: UpsertLegalDocRequest, db: OrmSession = Depends(get_db)):
     exists = (
         db.query(models.PolicyDocument)
