@@ -1,17 +1,49 @@
 # services/api/app/security.py
 
 import time
-from .config import settings
 from fastapi import Header, HTTPException
+from redis import Redis
+from redis.exceptions import RedisError
 
-# Basic in-memory rate limiting placeholder (keep your existing one if you had Redis-backed)
-_bucket = {}
+from .config import settings
+
+_redis: Redis | None = None
+
+_LUA_INCR_EXPIRE = """
+local current = redis.call("INCR", KEYS[1])
+if current == 1 then
+  redis.call("EXPIRE", KEYS[1], tonumber(ARGV[1]))
+end
+return current
+"""
+
+def _redis_client() -> Redis:
+    global _redis
+    if _redis is None:
+        _redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis
 
 def rate_limit_or_429(session_id: str) -> bool:
-    now = int(time.time())
-    key = (session_id, now // 60)
-    _bucket[key] = _bucket.get(key, 0) + 1
-    return _bucket[key] <= settings.RATE_LIMIT_PER_MIN
+    """
+    Returns True if allowed; False if should be rate-limited.
+    Uses a per-minute fixed window in Redis.
+
+    Key: rl:{session}:{minute_bucket}
+    TTL: 120 seconds
+    """
+    bucket = int(time.time() // 60)
+    key = f"rl:{session_id}:{bucket}"
+    window_sec = 120  # keep keys slightly longer than 60s to avoid edge thrash
+
+    try:
+        r = _redis_client()
+        count = int(r.eval(_LUA_INCR_EXPIRE, 1, key, window_sec))
+        return count <= int(settings.RATE_LIMIT_PER_MIN)
+    except RedisError:
+        # fail open by default for reliability
+        return bool(settings.RATE_LIMIT_FAIL_OPEN)
+    except Exception:
+        return bool(settings.RATE_LIMIT_FAIL_OPEN)
 
 def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
     if not settings.ADMIN_API_KEY:
