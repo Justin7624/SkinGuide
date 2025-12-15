@@ -1,6 +1,6 @@
 # services/api/app/routes_analyze.py
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Header
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Header, Request
 from sqlalchemy.orm import Session as OrmSession
 
 from .db import get_db
@@ -10,6 +10,7 @@ from . import models, schemas
 from .donation import store_roi_donation, store_progress_roi
 from .auth import require_user_auth
 from .image_safety import sanitize_upload_image
+from .audit import log_audit
 
 import httpx
 import json
@@ -47,16 +48,15 @@ def build_plan(attributes, quality):
 
 @router.post("/analyze", response_model=schemas.AnalyzeResponse)
 async def analyze(
+    request: Request,
     session_id: str | None = None,
     image: UploadFile = File(...),
     db: OrmSession = Depends(get_db),
     authorization: str | None = Header(default=None),
     x_device_token: str | None = Header(default=None),
 ):
-    # Auth
     session_id, _dvh = require_user_auth(db, session_id, authorization, x_device_token)
 
-    # Rate limit
     if not rate_limit_or_429(session_id):
         raise HTTPException(429, "Too many requests. Try again soon.")
 
@@ -64,7 +64,6 @@ async def analyze(
     if len(raw) > settings.MAX_IMAGE_MB * 1024 * 1024:
         raise HTTPException(413, "Image too large.")
 
-    # Sanitize/normalize upload (sniff type, decode, strip EXIF, re-encode JPEG)
     try:
         sanitized = sanitize_upload_image(raw)
     except ValueError as e:
@@ -81,7 +80,6 @@ async def analyze(
     except Exception:
         raise HTTPException(400, "Invalid image.")
 
-    # Load consent
     s = db.get(models.Session, session_id)
     if not s:
         raise HTTPException(404, "Session not found")
@@ -90,7 +88,15 @@ async def analyze(
     store_progress = bool(c.store_progress_images) if c else False
     donate_opt_in = bool(c.donate_for_improvement) if c else False
 
-    # Call ML with normalized JPEG bytes
+    log_audit(
+        db,
+        event_type="analyze_called",
+        session_id=session_id,
+        request=request,
+        payload={"regions_count": None, "attributes_count": None},
+    )
+    db.commit()
+
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             r = await client.post(
@@ -124,7 +130,6 @@ async def analyze(
         "donation": {"enabled": bool(donate_opt_in), "stored": False, "reason": None, "roi_sha256": roi_sha or None},
     }
 
-    # Decode ROI bytes from ML output (already ROI-only)
     roi_b64 = payload.get("roi_jpeg_b64")
     roi_bytes = None
     if roi_b64:
@@ -133,7 +138,6 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
-    # Store progress ROI if opted-in
     if store_progress and roi_bytes:
         stored, _reason, _uri = store_progress_roi(
             db=db,
@@ -144,11 +148,14 @@ async def analyze(
         )
         resp["stored_for_progress"] = bool(stored)
 
-    # Auto-donate (ROI-only) if opted-in
+    donation_stored = False
+    donation_reason = None
     if donate_opt_in:
         if not roi_bytes or not roi_sha:
+            donation_stored = False
+            donation_reason = "missing_roi"
             resp["donation"]["stored"] = False
-            resp["donation"]["reason"] = "missing_roi"
+            resp["donation"]["reason"] = donation_reason
         else:
             meta = {
                 "model_version": payload.get("model_version"),
@@ -156,14 +163,32 @@ async def analyze(
                 "attributes": payload.get("attributes"),
                 "regions": payload.get("regions", []),
             }
-            stored, reason = store_roi_donation(
+            donation_stored, donation_reason = store_roi_donation(
                 db=db,
                 session_id=session_id,
                 roi_sha256=roi_sha,
                 roi_bytes=roi_bytes,
                 metadata=meta,
             )
-            resp["donation"]["stored"] = bool(stored)
-            resp["donation"]["reason"] = reason
+            resp["donation"]["stored"] = bool(donation_stored)
+            resp["donation"]["reason"] = donation_reason
+
+    log_audit(
+        db,
+        event_type="analyze_completed",
+        session_id=session_id,
+        request=request,
+        payload={
+            "roi_sha256": roi_sha or None,
+            "model_version": payload.get("model_version"),
+            "quality": payload.get("quality"),
+            "regions_count": len(payload.get("regions", []) or []),
+            "attributes_count": len(payload.get("attributes", []) or []),
+            "stored_for_progress": bool(resp["stored_for_progress"]),
+            "donation_stored": bool(donation_stored),
+            "donation_reason": donation_reason,
+        },
+    )
+    db.commit()
 
     return resp
