@@ -69,6 +69,7 @@ class DonatedSample(Base):
 
     session: Mapped["Session"] = relationship(back_populates="donations")
     label_submissions: Mapped[list["DonatedSampleLabel"]] = relationship(back_populates="donated_sample")
+    consensus_artifacts: Mapped[list["ConsensusArtifact"]] = relationship(back_populates="donated_sample")
 
 
 class ModelArtifact(Base):
@@ -209,16 +210,34 @@ class DonatedSampleLabel(Base):
     # Quick filter for skip vs label
     is_skip: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
-    # Raw submission:
-    # {
-    #   "labels": {k: score0to1},
-    #   "region_labels": { "forehead": {k: score0to1}, ... },
-    #   "fitzpatrick": "...",
-    #   "age_band": "...",
-    #   "skipped": true/false,
-    #   "reason": "...",
-    # }
     labels_json: Mapped[str] = mapped_column(Text)
 
     donated_sample: Mapped["DonatedSample"] = relationship(back_populates="label_submissions")
     admin_user: Mapped["AdminUser"] = relationship(back_populates="labels")
+
+
+# --------------------------
+# Consensus audit artifacts
+# --------------------------
+
+class ConsensusArtifact(Base):
+    __tablename__ = "consensus_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    donated_sample_id: Mapped[int] = mapped_column(Integer, ForeignKey("donated_samples.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    status: Mapped[str] = mapped_column(String, index=True)  # e.g., "finalized", "needs_more", "escalated", "conflict", "skipped_final"
+    algorithm: Mapped[str] = mapped_column(String, default="median/mean_consensus", index=True)
+
+    # who triggered the attempt (if admin action)
+    computed_by_admin_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    computed_by_admin_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    # the full structured artifact json for forensic/debug
+    artifact_json: Mapped[str] = mapped_column(Text)
+
+    donated_sample: Mapped["DonatedSample"] = relationship(back_populates="consensus_artifacts")
