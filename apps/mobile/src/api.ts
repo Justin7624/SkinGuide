@@ -1,3 +1,5 @@
+// apps/mobile/src/api.ts
+
 import { Consent } from "./state";
 
 export async function createSession(apiBaseUrl: string) {
@@ -36,4 +38,23 @@ export async function deleteProgress(apiBaseUrl: string, sessionId: string) {
     method: "POST",
   });
   if (!r.ok) throw new Error("Failed to delete progress");
+}
+
+export async function labelSample(
+  apiBaseUrl: string,
+  sessionId: string,
+  payload: {
+    roi_sha256: string;
+    labels: Record<string, number>;
+    fitzpatrick?: "I" | "II" | "III" | "IV" | "V" | "VI";
+    age_band?: "<18" | "18-24" | "25-34" | "35-44" | "45-54" | "55-64" | "65+";
+  }
+) {
+  const r = await fetch(`${apiBaseUrl}/v1/label?session_id=${encodeURIComponent(sessionId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
 }
