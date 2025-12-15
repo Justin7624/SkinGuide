@@ -5,6 +5,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 from .db import Base
 
+# --------------------------
+# End-user tables
+# --------------------------
+
 class Session(Base):
     __tablename__ = "sessions"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -24,7 +28,6 @@ class Consent(Base):
     store_progress_images: Mapped[bool] = mapped_column(Boolean, default=False)
     donate_for_improvement: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    # NEW: legal acceptance stamping (version strings)
     accepted_privacy_version: Mapped[str | None] = mapped_column(String, nullable=True)
     accepted_terms_version: Mapped[str | None] = mapped_column(String, nullable=True)
     accepted_consent_version: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -40,7 +43,7 @@ class ProgressEntry(Base):
     session_id: Mapped[str] = mapped_column(String, ForeignKey("sessions.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    roi_image_path: Mapped[str | None] = mapped_column(String, nullable=True)  # uri string
+    roi_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
     result_json: Mapped[str] = mapped_column(Text)
 
     session: Mapped["Session"] = relationship(back_populates="progress")
@@ -54,7 +57,7 @@ class DonatedSample(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     roi_sha256: Mapped[str] = mapped_column(String, unique=True, index=True)
-    roi_image_path: Mapped[str] = mapped_column(String)  # uri string
+    roi_image_path: Mapped[str] = mapped_column(String)
     metadata_json: Mapped[str] = mapped_column(Text)
 
     labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -79,14 +82,7 @@ class ModelArtifact(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
-# --- NEW: legal docs scaffolding ---
-
 class PolicyDocument(Base):
-    """
-    Versioned legal/policy/copy docs.
-    key examples: "privacy_policy", "terms_of_use", "consent_copy"
-    version examples: "2025-12-14-v1"
-    """
     __tablename__ = "policy_documents"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -100,13 +96,7 @@ class PolicyDocument(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
 
 
-# --- NEW: audit trail ---
-
 class AuditEvent(Base):
-    """
-    Append-only audit log for admin dashboards & compliance evidence.
-    Do not store raw images, bearer tokens, device tokens, etc.
-    """
     __tablename__ = "audit_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -114,11 +104,52 @@ class AuditEvent(Base):
 
     event_type: Mapped[str] = mapped_column(String, index=True)
 
-    # Optional session attribution (hashed device is NOT stored here)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-
-    # Request context (redacted)
     request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
 
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# --------------------------
+# Admin RBAC + server sessions
+# --------------------------
+
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String)
+
+    # roles: "viewer" (read-only), "labeler" (label queue), "admin" (full)
+    role: Mapped[str] = mapped_column(String, default="viewer", index=True)
+
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    sessions: Mapped[list["AdminSession"]] = relationship(back_populates="user")
+
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # opaque token presented by cookie or Bearer
+    token: Mapped[str] = mapped_column(String, unique=True, index=True)
+
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_users.id"), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # CSRF token for cookie-based web requests
+    csrf_token: Mapped[str] = mapped_column(String, index=True)
+
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    user: Mapped["AdminUser"] = relationship(back_populates="sessions")
