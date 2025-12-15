@@ -73,7 +73,7 @@ async def analyze(
 
     c = db.get(models.Consent, session_id)
     store_progress = bool(c.store_progress_images) if c else False
-    donate = bool(c.donate_for_improvement) if c else False
+    donate_opt_in = bool(c.donate_for_improvement) if c else False
 
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
@@ -91,10 +91,9 @@ async def analyze(
         raise HTTPException(502, "Inference service error")
 
     payload = r.json()
+    roi_sha = payload.get("roi_sha256") or ""
 
     plan = build_plan(payload["attributes"], payload["quality"])
-
-    roi_sha = payload.get("roi_sha256") or ""
 
     resp = {
         "disclaimer": DISCLAIMER,
@@ -107,8 +106,15 @@ async def analyze(
         "model_version": payload["model_version"],
         "stored_for_progress": False,
         "roi_sha256": roi_sha or None,
+        "donation": {
+            "enabled": bool(donate_opt_in),
+            "stored": False,
+            "reason": None,
+            "roi_sha256": roi_sha or None,
+        }
     }
 
+    # Decode ROI bytes (NOT the original upload) for optional storage/donation
     roi_b64 = payload.get("roi_jpeg_b64")
     roi_bytes = None
     if roi_b64:
@@ -117,6 +123,7 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
+    # Store progress (ROI-only) ONLY if user opted in AND server storage enabled
     if store_progress and settings.STORE_IMAGES_ENABLED and roi_bytes:
         os.makedirs(settings.IMAGE_STORE_DIR, exist_ok=True)
         sha12 = roi_sha[:12] if roi_sha else ""
@@ -135,19 +142,26 @@ async def analyze(
         db.commit()
         resp["stored_for_progress"] = True
 
-    if donate and roi_bytes and roi_sha:
-        meta = {
-            "model_version": payload.get("model_version"),
-            "quality": payload.get("quality"),
-            "attributes": payload.get("attributes"),
-            "regions": payload.get("regions", []),
-        }
-        store_roi_donation(
-            db=db,
-            session_id=session_id,
-            roi_sha256=roi_sha,
-            roi_bytes=roi_bytes,
-            metadata=meta,
-        )
+    # Auto-donate (ROI-only) ONLY if user opted in
+    if donate_opt_in:
+        if not roi_bytes or not roi_sha:
+            resp["donation"]["stored"] = False
+            resp["donation"]["reason"] = "missing_roi"
+        else:
+            meta = {
+                "model_version": payload.get("model_version"),
+                "quality": payload.get("quality"),
+                "attributes": payload.get("attributes"),
+                "regions": payload.get("regions", []),
+            }
+            stored, reason = store_roi_donation(
+                db=db,
+                session_id=session_id,
+                roi_sha256=roi_sha,
+                roi_bytes=roi_bytes,
+                metadata=meta,
+            )
+            resp["donation"]["stored"] = bool(stored)
+            resp["donation"]["reason"] = reason
 
     return resp
