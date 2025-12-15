@@ -32,10 +32,17 @@ class Settings(BaseSettings):
 
     # Auth
     SESSION_SECRET: str
-    REQUIRE_AUTH: bool = False  # set true in production
+    REQUIRE_AUTH: bool = False
     ACCESS_TOKEN_TTL_MIN: int = 60 * 24 * 30  # 30 days
 
+    # Rate limiting (Redis-backed)
     RATE_LIMIT_PER_MIN: int = 20
+    RATE_LIMIT_FAIL_OPEN: bool = True  # if Redis is down, allow requests (recommended for launch)
+
+    # Upload hardening
     MAX_IMAGE_MB: int = 6
+    MAX_IMAGE_PIXELS: int = 12_000_000  # 12MP
+    MIN_IMAGE_DIM: int = 320           # reject tiny images
+    MAX_IMAGE_DIM: int = 4096          # downscale if larger than this
 
 settings = Settings()
