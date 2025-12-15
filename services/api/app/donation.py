@@ -1,13 +1,10 @@
 # services/api/app/donation.py
 
-import os
 import json
 from sqlalchemy.orm import Session as OrmSession
 from .config import settings
 from . import models
-
-def _safe_mkdir(path: str):
-    os.makedirs(path, exist_ok=True)
+from .storage import get_storage
 
 def store_roi_donation(
     db: OrmSession,
@@ -16,19 +13,8 @@ def store_roi_donation(
     roi_bytes: bytes,
     metadata: dict,
 ) -> tuple[bool, str]:
-    """
-    Stores ROI-only donation if enabled. Dedupes by roi_sha256.
-
-    Returns (stored, reason):
-      - (False, donation_storage_disabled)
-      - (False, missing_roi)
-      - (True, stored)
-      - (True, already_donated)           (exists and belongs to same session)
-      - (False, duplicate_other_session)  (exists but belongs to different session)
-    """
     if not settings.DONATION_STORAGE_ENABLED:
         return (False, "donation_storage_disabled")
-
     if not roi_sha256 or not roi_bytes:
         return (False, "missing_roi")
 
@@ -38,19 +24,15 @@ def store_roi_donation(
             return (True, "already_donated")
         return (False, "duplicate_other_session")
 
+    storage = get_storage()
     shard = roi_sha256[:2]
-    dirpath = os.path.join(settings.DONATION_STORE_DIR, shard)
-    _safe_mkdir(dirpath)
-
-    fpath = os.path.join(dirpath, f"{roi_sha256}.jpg")
-    if not os.path.exists(fpath):
-        with open(fpath, "wb") as f:
-            f.write(roi_bytes)
+    key = f"donations/{shard}/{roi_sha256}.jpg"
+    stored_obj = storage.put_bytes(data=roi_bytes, key=key, content_type="image/jpeg")
 
     rec = models.DonatedSample(
         session_id=session_id,
         roi_sha256=roi_sha256,
-        roi_image_path=fpath,
+        roi_image_path=stored_obj.uri,
         metadata_json=json.dumps(metadata, ensure_ascii=False),
         labels_json=None,
         labeled_at=None,
@@ -60,38 +42,31 @@ def store_roi_donation(
     return (True, "stored")
 
 
-def store_labels_for_sample(
+def store_progress_roi(
     db: OrmSession,
     session_id: str,
     roi_sha256: str,
-    labels_payload: dict,
-) -> tuple[bool, str]:
+    roi_bytes: bytes,
+    result_json_str: str,
+) -> tuple[bool, str, str | None]:
     """
-    Stores labels for an existing donated sample.
-    Also writes a JSON label file to DONATION_LABEL_DIR for trainer consumption.
+    Stores ROI-only progress image. Returns (stored, reason, uri_or_none).
     """
-    if not settings.DONATION_STORAGE_ENABLED:
-        return (False, "donation_storage_disabled")
+    if not settings.STORE_IMAGES_ENABLED:
+        return (False, "progress_storage_disabled", None)
+    if not roi_bytes:
+        return (False, "missing_roi", None)
 
-    if not roi_sha256:
-        return (False, "missing_roi_sha256")
+    storage = get_storage()
+    shard = (roi_sha256[:2] if roi_sha256 else "xx")
+    key = f"progress/{shard}/{roi_sha256 or 'nohash'}.jpg"
+    stored_obj = storage.put_bytes(data=roi_bytes, key=key, content_type="image/jpeg")
 
-    sample = db.query(models.DonatedSample).filter(models.DonatedSample.roi_sha256 == roi_sha256).first()
-    if not sample:
-        return (False, "sample_not_found")
-
-    # Without accounts, keep ownership strict: only the donating session can label its sample.
-    if sample.session_id != session_id:
-        return (False, "not_owner")
-
-    from datetime import datetime
-    sample.labels_json = json.dumps(labels_payload, ensure_ascii=False)
-    sample.labeled_at = datetime.utcnow()
+    entry = models.ProgressEntry(
+        session_id=session_id,
+        roi_image_path=stored_obj.uri,
+        result_json=result_json_str,
+    )
+    db.add(entry)
     db.commit()
-
-    _safe_mkdir(settings.DONATION_LABEL_DIR)
-    label_path = os.path.join(settings.DONATION_LABEL_DIR, f"{roi_sha256}.json")
-    with open(label_path, "w", encoding="utf-8") as f:
-        json.dump(labels_payload, f, ensure_ascii=False, indent=2)
-
-    return (True, "stored")
+    return (True, "stored", stored_obj.uri)
