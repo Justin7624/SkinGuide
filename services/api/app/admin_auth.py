@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
+import pyotp
 from fastapi import HTTPException, Request, Response
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session as OrmSession
@@ -34,6 +37,18 @@ def _now() -> datetime:
 
 def _new_token(prefix: str) -> str:
     return f"{prefix}_{secrets.token_urlsafe(32)}"
+
+def _peppered_sha256(value: str) -> str:
+    # stable hash w/ server pepper (SESSION_SECRET)
+    h = hashlib.sha256()
+    h.update(settings.SESSION_SECRET.encode("utf-8"))
+    h.update(b":")
+    h.update(value.encode("utf-8"))
+    return h.hexdigest()
+
+# --------------------------
+# Admin sessions (server-side)
+# --------------------------
 
 def create_admin_session(db: OrmSession, *, user: models.AdminUser, request: Request) -> models.AdminSession:
     ttl = int(settings.ADMIN_SESSION_TTL_MIN)
@@ -72,8 +87,7 @@ def clear_admin_cookie(response: Response):
 def get_admin_session_from_request(db: OrmSession, request: Request) -> Tuple[models.AdminSession, models.AdminUser, bool]:
     """
     Returns (admin_session, user, is_cookie_auth).
-    - Cookie auth uses CSRF on state-changing requests.
-    - Bearer auth does not require CSRF header.
+    Cookie auth uses CSRF on state-changing requests.
     """
     auth = request.headers.get("authorization") or ""
     token = None
@@ -86,11 +100,9 @@ def get_admin_session_from_request(db: OrmSession, request: Request) -> Tuple[mo
         token = request.cookies.get(settings.ADMIN_COOKIE_NAME)
         is_cookie = True
 
-    # Legacy shared admin key (optional, for emergency) — prefer RBAC.
+    # Legacy shared admin key (optional)
     x_admin_key = request.headers.get("x-admin-key")
     if settings.ADMIN_API_KEY and x_admin_key == settings.ADMIN_API_KEY:
-        # Create a pseudo user context (admin) without DB user.
-        # This keeps backwards compatibility but you can disable by leaving ADMIN_API_KEY unset.
         fake_user = models.AdminUser(id=-1, email="legacy-admin-key", password_hash="*", role="admin", is_active=True)  # type: ignore
         fake_session = models.AdminSession(id=-1, token="legacy", user_id=-1, created_at=_now(), expires_at=_now() + timedelta(days=3650), revoked_at=None, csrf_token="legacy", ip=None, user_agent=None)  # type: ignore
         return fake_session, fake_user, False
@@ -114,8 +126,65 @@ def get_admin_session_from_request(db: OrmSession, request: Request) -> Tuple[mo
 def require_csrf_if_cookie(request: Request, admin_session: models.AdminSession, is_cookie_auth: bool):
     if not is_cookie_auth:
         return
-    # Require CSRF header on state-changing requests when using cookie auth.
     if request.method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
         csrf = request.headers.get("x-csrf-token")
         if not csrf or csrf != admin_session.csrf_token:
             raise HTTPException(403, "CSRF token missing/invalid")
+
+# --------------------------
+# TOTP 2FA + recovery codes
+# --------------------------
+
+def totp_provisioning_uri(email: str, secret: str) -> str:
+    # app name shown in authenticator apps
+    issuer = "SkinGuide Admin"
+    return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name=issuer)
+
+def verify_totp(secret: str, code: str) -> bool:
+    # allow small clock drift
+    try:
+        totp = pyotp.TOTP(secret)
+        return bool(totp.verify(code, valid_window=1))
+    except Exception:
+        return False
+
+def generate_recovery_codes(count: int = 10) -> list[str]:
+    # human-friendly: 10 codes like ABCD-EFGH-IJKL
+    out = []
+    for _ in range(count):
+        raw = secrets.token_hex(6).upper()  # 12 hex chars
+        out.append(f"{raw[0:4]}-{raw[4:8]}-{raw[8:12]}")
+    return out
+
+def hash_recovery_codes(codes: list[str]) -> str:
+    hashed = [_peppered_sha256(c) for c in codes]
+    return json.dumps(hashed)
+
+def consume_recovery_code(user: models.AdminUser, code: str) -> bool:
+    """
+    Returns True if code was valid and consumed.
+    """
+    if not user.recovery_codes_json:
+        return False
+    try:
+        hashes = json.loads(user.recovery_codes_json)
+        if not isinstance(hashes, list):
+            return False
+        h = _peppered_sha256(code)
+        if h not in hashes:
+            return False
+        hashes.remove(h)
+        user.recovery_codes_json = json.dumps(hashes)
+        return True
+    except Exception:
+        return False
+
+# --------------------------
+# Password reset tokens
+# --------------------------
+
+def mint_reset_token() -> str:
+    return _new_token("rst")
+
+def hash_reset_token(token: str) -> str:
+    return _peppered_sha256(token)
