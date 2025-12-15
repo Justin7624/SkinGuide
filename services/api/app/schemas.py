@@ -64,6 +64,12 @@ class ConsentUpsert(BaseModel):
     store_progress_images: bool
     donate_for_improvement: bool
 
+    # NEW: client can echo the versions they displayed/asked acceptance for.
+    # If omitted, server will stamp "current" versions (scaffolding).
+    accepted_privacy_version: Optional[str] = None
+    accepted_terms_version: Optional[str] = None
+    accepted_consent_version: Optional[str] = None
+
 class SessionCreateResponse(BaseModel):
     session_id: str
     store_images_default: bool
@@ -85,8 +91,6 @@ class LabelResponse(BaseModel):
     stored: bool
     reason: Optional[str] = None
     roi_sha256: Optional[str] = None
-
-# --- Model registry ---
 
 class ModelRegisterRequest(BaseModel):
     version: str
