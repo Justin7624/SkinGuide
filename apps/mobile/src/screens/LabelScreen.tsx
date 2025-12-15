@@ -28,7 +28,7 @@ const ATTRS: { key: AttributeKey; label: string }[] = [
 type Severity = "none" | "mild" | "moderate" | "severe";
 
 function sevToValue(s: Severity): number | null {
-  if (s === "none") return null;      // omit from sparse labels
+  if (s === "none") return null; // omit from sparse labels
   if (s === "mild") return 0.33;
   if (s === "moderate") return 0.66;
   return 1.0;
@@ -51,10 +51,18 @@ function Chip(props: { text: string; active?: boolean; onPress: () => void }) {
   );
 }
 
+function donationLine(d: any) {
+  if (!d?.enabled) return "Donation: OFF (not opted in)";
+  if (d?.stored) return "Donation: ✅ Stored (ROI-only)";
+  if (d?.reason === "already_donated") return "Donation: ✅ Already donated (ROI-only)";
+  return `Donation: ❌ Not stored (${d?.reason ?? "unknown"})`;
+}
+
 export default function LabelScreen(props: {
   apiBaseUrl: string;
   sessionId: string;
   roiSha256: string;
+  donationInfo?: any;
   onBack: () => void;
   onDone: () => void;
 }) {
@@ -103,10 +111,7 @@ export default function LabelScreen(props: {
         Alert.alert("Thanks!", "Label saved for model improvement.");
         props.onDone();
       } else {
-        Alert.alert(
-          "Not saved",
-          `Reason: ${resp?.reason ?? "unknown"}\n\n(Labels require opt-in donation consent and a donated sample.)`
-        );
+        Alert.alert("Not saved", `Reason: ${resp?.reason ?? "unknown"}`);
       }
     } catch (e: any) {
       Alert.alert("Error", e?.message ?? "Failed to submit labels.");
@@ -119,9 +124,13 @@ export default function LabelScreen(props: {
     <ScrollView contentContainerStyle={{ gap: 12, paddingBottom: 40 }}>
       <Text style={{ fontSize: 16, fontWeight: "700" }}>Help improve the AI</Text>
       <Text>
-        This is optional. You’re labeling the *appearance* in your ROI-only scan to help train the model.
-        It’s not a diagnosis.
+        Optional. You’re labeling the *appearance* in your ROI-only scan to help train the model. Not a diagnosis.
       </Text>
+
+      <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
+        <Text style={{ fontWeight: "700" }}>Donation status</Text>
+        <Text>{donationLine(props.donationInfo)}</Text>
+      </View>
 
       <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
         <Text style={{ fontWeight: "700" }}>Scan ID</Text>
