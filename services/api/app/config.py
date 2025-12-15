@@ -1,3 +1,5 @@
+# services/api/app/config.py
+
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -8,6 +10,10 @@ class Settings(BaseSettings):
     STORE_IMAGES_DEFAULT: bool = False
     STORE_IMAGES_ENABLED: bool = False
     IMAGE_STORE_DIR: str = "/data/images"
+
+    # Donation pipeline: ROI-only storage, consent-gated
+    DONATION_STORAGE_ENABLED: bool = False
+    DONATION_STORE_DIR: str = "/data/donations"
 
     SESSION_SECRET: str
     RATE_LIMIT_PER_MIN: int = 20
