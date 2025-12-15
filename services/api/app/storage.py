@@ -18,6 +18,9 @@ class Storage:
     def put_bytes(self, *, data: bytes, key: str, content_type: str) -> StoredObject:
         raise NotImplementedError
 
+    def delete_uri(self, uri: str) -> bool:
+        return False
+
     def get_local_path_if_any(self, uri: str) -> Optional[str]:
         return None
 
@@ -28,12 +31,22 @@ class LocalStorage(Storage):
         os.makedirs(self.base_dir, exist_ok=True)
 
     def put_bytes(self, *, data: bytes, key: str, content_type: str) -> StoredObject:
-        # key like "progress/ab/cd.jpg" or "donations/ab/sha.jpg"
         full_path = os.path.join(self.base_dir, key)
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
         with open(full_path, "wb") as f:
             f.write(data)
         return StoredObject(uri=f"file://{full_path}")
+
+    def delete_uri(self, uri: str) -> bool:
+        p = urlparse(uri)
+        if p.scheme != "file":
+            return False
+        try:
+            if os.path.exists(p.path):
+                os.remove(p.path)
+            return True
+        except Exception:
+            return False
 
     def get_local_path_if_any(self, uri: str) -> Optional[str]:
         p = urlparse(uri)
@@ -65,6 +78,18 @@ class S3Storage(Storage):
         )
         return StoredObject(uri=f"s3://{self.bucket}/{s3_key}")
 
+    def delete_uri(self, uri: str) -> bool:
+        p = urlparse(uri)
+        if p.scheme != "s3":
+            return False
+        bucket = p.netloc
+        key = p.path.lstrip("/")
+        try:
+            self.s3.delete_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            return False
+
 
 _storage_singleton: Storage | None = None
 
@@ -79,7 +104,5 @@ def get_storage() -> Storage:
         _storage_singleton = S3Storage(bucket=settings.S3_BUCKET, prefix=settings.S3_PREFIX)
         return _storage_singleton
 
-    # Default local: base_dir governs root; we store subfolders under it
-    # Use /data as base so existing volumes still work.
     _storage_singleton = LocalStorage(base_dir="/data")
     return _storage_singleton
