@@ -8,7 +8,12 @@ function topAttrs(attrs: any[], n: number) {
   return [...attrs].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, n);
 }
 
-export default function ResultsScreen(props: { result: any; onNewScan: () => void }) {
+export default function ResultsScreen(props: {
+  result: any;
+  onNewScan: () => void;
+  onLabelScan: () => void;
+  canLabel: boolean;
+}) {
   const r = props.result;
 
   return (
@@ -17,6 +22,7 @@ export default function ResultsScreen(props: { result: any; onNewScan: () => voi
       <Text>{r.disclaimer}</Text>
       <Text>Model: {r.model_version}</Text>
       {r.stored_for_progress ? <Text>✅ Stored for progress (opt-in)</Text> : <Text>🛡️ Not stored</Text>}
+      {r.roi_sha256 ? <Text selectable>ROI id: {r.roi_sha256}</Text> : null}
 
       <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
         <Text style={{ fontWeight: "700" }}>Overall quality</Text>
@@ -95,9 +101,29 @@ export default function ResultsScreen(props: { result: any; onNewScan: () => voi
         )}
       </View>
 
-      <Pressable onPress={props.onNewScan} style={{ padding: 14, borderRadius: 12, backgroundColor: "black" }}>
-        <Text style={{ color: "white", textAlign: "center", fontWeight: "700" }}>New scan</Text>
-      </Pressable>
+      <View style={{ flexDirection: "row", gap: 12 }}>
+        <Pressable onPress={props.onNewScan} style={{ flex: 1, padding: 14, borderRadius: 12, backgroundColor: "black" }}>
+          <Text style={{ color: "white", textAlign: "center", fontWeight: "700" }}>New scan</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={props.onLabelScan}
+          disabled={!props.canLabel}
+          style={{
+            flex: 1,
+            padding: 14,
+            borderRadius: 12,
+            borderWidth: 1,
+            opacity: props.canLabel ? 1 : 0.5,
+          }}
+        >
+          <Text style={{ textAlign: "center", fontWeight: "700" }}>Label scan</Text>
+        </Pressable>
+      </View>
+
+      <Text style={{ opacity: 0.7 }}>
+        Note: Labels are only saved if you opted in to donate data for improvement and the ROI was donated.
+      </Text>
     </ScrollView>
   );
 }
