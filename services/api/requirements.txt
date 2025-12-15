@@ -10,3 +10,5 @@ alembic==1.13.2
 boto3==1.35.10
 
 Pillow==10.4.0
+
+passlib[bcrypt]==1.7.4
