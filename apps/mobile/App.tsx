@@ -38,6 +38,12 @@ export default function App() {
 
   const roiSha: string | null = result?.roi_sha256 ?? null;
 
+  const donationStored: boolean =
+    !!result?.donation?.stored ||
+    result?.donation?.reason === "already_donated";
+
+  const canLabel = !!roiSha && donationStored;
+
   return (
     <SafeAreaView style={{ flex: 1, padding: 16 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 12 }}>
@@ -88,7 +94,7 @@ export default function App() {
             setScreen("camera");
           }}
           onLabelScan={() => setScreen("label")}
-          canLabel={!!roiSha}
+          canLabel={canLabel}
         />
       )}
 
@@ -97,6 +103,7 @@ export default function App() {
           apiBaseUrl={st.apiBaseUrl}
           sessionId={st.sessionId}
           roiSha256={roiSha}
+          donationInfo={result?.donation}
           onBack={() => setScreen("results")}
           onDone={() => setScreen("results")}
         />
