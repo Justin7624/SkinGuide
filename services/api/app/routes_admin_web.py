@@ -27,6 +27,7 @@ _HTML = r"""<!doctype html>
     button.good{background:rgba(37,208,166,.2);border:1px solid rgba(37,208,166,.35);font-weight:800}
     button.bad{background:rgba(255,107,107,.15);border:1px solid rgba(255,107,107,.35);font-weight:800}
     .span4{grid-column:span 4}
+    .span6{grid-column:span 6}
     .span12{grid-column:span 12}
     .muted{color:var(--muted)}
     .small{font-size:12px}
@@ -35,7 +36,7 @@ _HTML = r"""<!doctype html>
     .imgbox{background:#0f1118;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:10px}
     .stage{position:relative;overflow:auto;border-radius:12px;border:1px solid rgba(255,255,255,.06);background:#0b0c10}
     img{display:block;max-width:none}
-    canvas{position:absolute;left:0;top:0;pointer-events:none}
+    canvas.overlay{position:absolute;left:0;top:0;pointer-events:none}
     .sliderrow{display:grid;grid-template-columns:260px 1fr 64px;gap:10px;align-items:center;margin-top:8px}
     .rowline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .tabs{display:flex;gap:8px;flex-wrap:wrap}
@@ -46,6 +47,10 @@ _HTML = r"""<!doctype html>
     pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0;max-height:360px;overflow:auto}
     .drawer{position:fixed;right:16px;top:16px;bottom:16px;width:min(560px, calc(100vw - 32px));background:var(--card);
       border:1px solid rgba(255,255,255,.12);border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:14px;overflow:auto}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,.08);font-size:12px}
+    th{text-align:left;color:var(--muted);font-weight:800}
+    .chart{width:100%;height:220px;background:#0f1118;border:1px solid rgba(255,255,255,.08);border-radius:12px}
   </style>
 </head>
 <body>
@@ -88,6 +93,7 @@ _HTML = r"""<!doctype html>
           <div class="tab active" id="tabQueue" onclick="setTab('queue')">Queue</div>
           <div class="tab" id="tabConf" onclick="setTab('conf')">Conflicts <span class="badge" id="confCount">—</span></div>
           <div class="tab" id="tabIrr" onclick="setTab('irr')">IRR stats</div>
+          <div class="tab" id="tabMetrics" onclick="setTab('metrics')">Metrics</div>
         </div>
         <div class="rowline">
           <button onclick="refreshAll()">Refresh</button>
@@ -100,7 +106,7 @@ _HTML = r"""<!doctype html>
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div>
           <div class="k" id="panelTitle">Label queue</div>
-          <div class="muted small" id="panelSubtitle">Normal queue excludes conflicts. Conflicts tab shows mixed/disagreement samples.</div>
+          <div class="muted small" id="panelSubtitle">Normal queue excludes conflicts. Escalated items need 3rd labeler.</div>
         </div>
         <div class="rowline">
           <button onclick="loadQueue()">Load</button>
@@ -118,7 +124,7 @@ _HTML = r"""<!doctype html>
           <div class="muted small" id="qMeta">—</div>
           <div class="stage" id="stage" style="margin-top:10px;max-height:520px">
             <img id="qImg" />
-            <canvas id="qCanvas"></canvas>
+            <canvas class="overlay" id="qCanvas"></canvas>
           </div>
         </div>
 
@@ -126,6 +132,7 @@ _HTML = r"""<!doctype html>
           <div class="muted small">
             Sample: <span id="qId">—</span> / sha: <span id="qSha">—</span> · submissions: <span id="qSubs">—</span>
             <span id="qConflict" class="badc" style="margin-left:10px"></span>
+            <span id="qEsc" class="muted small" style="margin-left:10px"></span>
           </div>
 
           <div class="rowline" style="margin-top:10px">
@@ -159,19 +166,71 @@ _HTML = r"""<!doctype html>
       <div class="rowline" style="justify-content:space-between">
         <div>
           <div class="k">Inter-rater reliability</div>
-          <div class="muted small">Computed on latest 2 distinct non-skip submissions per sample in window.</div>
-        </div>
-        <div class="rowline">
-          <select id="irrDays">
-            <option value="7">7d</option>
-            <option value="30" selected>30d</option>
-            <option value="90">90d</option>
-            <option value="365">365d</option>
-          </select>
-          <button onclick="loadIRR()">Load</button>
+          <div class="muted small">Use /label-queue/stats/irr (not shown here). This tab kept for continuity.</div>
         </div>
       </div>
       <pre id="irrOut" style="margin-top:12px">—</pre>
+    </div>
+
+    <!-- Metrics panel -->
+    <div class="card span12 hide" id="panelMetrics">
+      <div class="rowline" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
+        <div>
+          <div class="k">Metrics</div>
+          <div class="muted small">Conflict/escalation rates from consensus artifacts + nightly labeler reliability snapshots.</div>
+        </div>
+        <div class="rowline">
+          <select id="mDays">
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="180">180d</option>
+            <option value="365">365d</option>
+          </select>
+          <select id="mWindow">
+            <option value="60">weights window 60d</option>
+            <option value="180" selected>weights window 180d</option>
+            <option value="365">weights window 365d</option>
+          </select>
+          <button onclick="loadMetrics()">Load</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <div class="card span6">
+          <div class="k">Conflict rate</div>
+          <canvas id="chartConflict" class="chart"></canvas>
+          <div class="muted small" id="confNote" style="margin-top:8px">—</div>
+        </div>
+        <div class="card span6">
+          <div class="k">Escalation rate</div>
+          <canvas id="chartEscal" class="chart"></canvas>
+          <div class="muted small" id="escNote" style="margin-top:8px">—</div>
+        </div>
+
+        <div class="card span12">
+          <div class="rowline" style="justify-content:space-between;align-items:center">
+            <div>
+              <div class="k">Labeler reliability (latest snapshot)</div>
+              <div class="muted small" id="labNote">—</div>
+            </div>
+            <button onclick="loadMetrics()">Refresh</button>
+          </div>
+          <div style="overflow:auto;margin-top:10px">
+            <table id="labTable">
+              <thead>
+                <tr>
+                  <th>Labeler</th><th>Samples</th><th>MAE</th><th>Reliability</th><th>Weight</th><th>Snapshot time</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <div class="k" style="margin-top:14px">Top labelers (weight over time)</div>
+          <canvas id="chartWeights" class="chart" style="margin-top:8px;height:260px"></canvas>
+          <div class="muted small" id="wNote" style="margin-top:8px">—</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -196,7 +255,7 @@ _HTML = r"""<!doctype html>
   let csrf = null;
   let me = null;
 
-  let tab = "queue"; // queue|conf|irr
+  let tab = "queue"; // queue|conf|irr|metrics
 
   let queue = [];
   let qIndex = 0;
@@ -331,6 +390,7 @@ _HTML = r"""<!doctype html>
     await loadSummary();
     await loadQueue();
     await loadConfCount();
+    if (tab === 'metrics') await loadMetrics();
   }
 
   async function loadSummary(){
@@ -346,18 +406,22 @@ _HTML = r"""<!doctype html>
     document.getElementById('tabQueue').classList.toggle('active', tab==='queue');
     document.getElementById('tabConf').classList.toggle('active', tab==='conf');
     document.getElementById('tabIrr').classList.toggle('active', tab==='irr');
+    document.getElementById('tabMetrics').classList.toggle('active', tab==='metrics');
 
-    document.getElementById('panelMain').classList.toggle('hide', tab==='irr');
+    document.getElementById('panelMain').classList.toggle('hide', tab==='irr' || tab==='metrics');
     document.getElementById('panelIRR').classList.toggle('hide', tab!=='irr');
+    document.getElementById('panelMetrics').classList.toggle('hide', tab!=='metrics');
 
     if (tab==='queue'){
       document.getElementById('panelTitle').textContent = 'Label queue';
-      document.getElementById('panelSubtitle').textContent = 'Normal queue excludes conflicts.';
+      document.getElementById('panelSubtitle').textContent = 'Normal queue excludes conflicts. Escalated items need 3rd labeler.';
       loadQueue();
     } else if (tab==='conf'){
       document.getElementById('panelTitle').textContent = 'Conflicts queue';
-      document.getElementById('panelSubtitle').textContent = 'Mixed skip/label or disagreement. Use Review + (admin) Force finalize.';
+      document.getElementById('panelSubtitle').textContent = 'Mixed skip/label or unresolved disagreement. Use Review + (admin) Force finalize.';
       loadConflicts();
+    } else if (tab==='metrics'){
+      loadMetrics();
     }
   }
 
@@ -432,6 +496,7 @@ _HTML = r"""<!doctype html>
   function showQueueItem(){
     document.getElementById('qErr').textContent = '';
     document.getElementById('qConflict').textContent = '';
+    document.getElementById('qEsc').textContent = '';
     document.getElementById('btnForce').classList.add('hide');
 
     if (!queue.length){
@@ -454,6 +519,9 @@ _HTML = r"""<!doctype html>
     if (it.conflict){
       document.getElementById('qConflict').textContent = 'CONFLICT';
       if (me && me.role === 'admin') document.getElementById('btnForce').classList.remove('hide');
+    }
+    if (it.escalate){
+      document.getElementById('qEsc').textContent = `ESCALATED → needs ${it.need_n} labelers (have ${it.have_non_skip || 0})`;
     }
 
     const meta = safeJsonParse(it.metadata_json || '');
@@ -490,9 +558,6 @@ _HTML = r"""<!doctype html>
 
   async function loadConfCount(){
     try{
-      const r = await api('/v1/admin/label-queue/conflicts?limit=1');
-      const j = await r.json();
-      // backend doesn't return total, so we estimate by fetching 50 quickly:
       const r2 = await api('/v1/admin/label-queue/conflicts?limit=50');
       const j2 = await r2.json();
       document.getElementById('confCount').textContent = (j2.items||[]).length;
@@ -556,6 +621,7 @@ _HTML = r"""<!doctype html>
     if (!queue.length) return;
     const it = queue[qIndex];
     try{
+      // this endpoint exists in your earlier version; if you removed it, keep the drawer disabled.
       const r = await api(`/v1/admin/label-queue/${it.id}/review`);
       const j = await r.json();
       document.getElementById('drawerSub').textContent = `Sample ${j.donated_sample_id} · ${j.roi_sha256}`;
@@ -600,59 +666,147 @@ _HTML = r"""<!doctype html>
     }
   }
 
-  // -------- IRR --------
-  async function loadIRR(){
-    const days = document.getElementById('irrDays').value;
-    const r = await api(`/v1/admin/label-queue/stats/irr?days=${encodeURIComponent(days)}`);
-    const j = await r.json();
-    document.getElementById('irrOut').textContent = JSON.stringify(j, null, 2);
-  }
+  // -------- Metrics charts --------
+  function drawLineChart(canvasId, labels, values, opts={}){
+    const c = document.getElementById(canvasId);
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth;
+    const h = c.clientHeight;
+    c.width = Math.floor(w * dpr);
+    c.height = Math.floor(h * dpr);
+    const g = c.getContext('2d');
+    g.scale(dpr,dpr);
 
-  // -------- Hotkeys --------
-  function isTypingTarget(ev){
-    const t = ev.target;
-    if (!t) return false;
-    const tag = (t.tagName || '').toLowerCase();
-    return tag === 'input' || tag === 'textarea' || tag === 'select';
-  }
+    g.clearRect(0,0,w,h);
 
-  document.addEventListener('keydown', (ev)=>{
-    if (isTypingTarget(ev)) return;
-    if (document.getElementById('dash').classList.contains('hide')) return;
+    // axes padding
+    const padL = 40, padR = 10, padT = 10, padB = 24;
+    const iw = w - padL - padR;
+    const ih = h - padT - padB;
 
-    const k = ev.key;
-    if (k === 'Enter'){ ev.preventDefault(); submitLabel(); return; }
-    if (k === 'x' || k === 'X'){ ev.preventDefault(); skipLabel(); return; }
-    if (k === 'n' || k === 'N'){ ev.preventDefault(); nextItem(); return; }
-    if (k === 'p' || k === 'P'){ ev.preventDefault(); prevItem(); return; }
-    if (k === 'z' || k === 'Z'){ ev.preventDefault(); zoom.focus(); return; }
-
-    if (k >= '1' && k <= '8'){
-      const idx = parseInt(k,10)-1;
-      const sid = sliders[idx][1];
-      const el = document.getElementById(sid);
-      el.focus();
-      focusedSlider = el;
-      return;
+    // grid
+    g.strokeStyle = "rgba(255,255,255,0.08)";
+    g.lineWidth = 1;
+    for(let i=0;i<=4;i++){
+      const y = padT + (ih*i/4);
+      g.beginPath(); g.moveTo(padL,y); g.lineTo(w-padR,y); g.stroke();
     }
 
-    if (k === 'ArrowLeft' || k === 'ArrowRight'){
-      if (!focusedSlider) return;
-      ev.preventDefault();
-      const step = ev.shiftKey ? 10 : 1;
-      let v = parseInt(focusedSlider.value,10);
-      v += (k === 'ArrowRight') ? step : -step;
-      v = Math.max(0, Math.min(100, v));
-      focusedSlider.value = v;
-      for (const [ak,sid,vid] of sliders){
-        if (sid === focusedSlider.id){
-          document.getElementById(vid).textContent = String(v);
-          break;
-        }
+    const minY = (opts.minY!=null)?opts.minY:0;
+    const maxY = (opts.maxY!=null)?opts.maxY:1;
+
+    function xAt(i){ return padL + (iw * (labels.length<=1?0:i/(labels.length-1))); }
+    function yAt(v){
+      const t = (v - minY) / (maxY - minY || 1);
+      return padT + ih - (ih * Math.max(0, Math.min(1, t)));
+    }
+
+    // line
+    g.strokeStyle = opts.color || "rgba(124,92,255,0.95)";
+    g.lineWidth = 2;
+    g.beginPath();
+    for(let i=0;i<values.length;i++){
+      const v = values[i];
+      if (v==null) continue;
+      const x = xAt(i);
+      const y = yAt(v);
+      if (i===0) g.moveTo(x,y); else g.lineTo(x,y);
+    }
+    g.stroke();
+
+    // labels
+    g.fillStyle = "rgba(154,163,178,0.95)";
+    g.font = "12px ui-sans-serif, system-ui";
+    g.textAlign = "left"; g.textBaseline = "top";
+    g.fillText(opts.title || "", 8, 8);
+
+    g.textAlign = "left"; g.textBaseline = "bottom";
+    g.fillText(labels.length ? labels[0] : "", padL, h-6);
+    g.textAlign = "right";
+    g.fillText(labels.length ? labels[labels.length-1] : "", w-padR, h-6);
+
+    g.textAlign = "right"; g.textBaseline = "top";
+    g.fillText((maxY).toFixed(2), padL-6, padT);
+    g.textBaseline = "bottom";
+    g.fillText((minY).toFixed(2), padL-6, padT+ih);
+  }
+
+  async function loadMetrics(){
+    const days = document.getElementById('mDays').value;
+    const windowDays = document.getElementById('mWindow').value;
+
+    // conflict rates
+    try{
+      const r = await api(`/v1/admin/label-queue/stats/conflict-rates?days=${encodeURIComponent(days)}`);
+      const j = await r.json();
+      const labels = (j.points||[]).map(p=>p.date);
+      const cvals = (j.points||[]).map(p=>p.conflict_rate);
+      const evals = (j.points||[]).map(p=>p.escalated_rate);
+      drawLineChart("chartConflict", labels, cvals, {title:"conflict rate", minY:0, maxY:1, color:"rgba(255,107,107,0.95)"});
+      drawLineChart("chartEscal", labels, evals, {title:"escalation rate", minY:0, maxY:1, color:"rgba(37,208,166,0.95)"});
+      document.getElementById('confNote').textContent = `Points: ${labels.length} · latest: ${(cvals[cvals.length-1]||0).toFixed(3)}`;
+      document.getElementById('escNote').textContent = `Points: ${labels.length} · latest: ${(evals[evals.length-1]||0).toFixed(3)}`;
+    }catch(e){
+      document.getElementById('confNote').textContent = String(e);
+      document.getElementById('escNote').textContent = String(e);
+    }
+
+    // labeler latest
+    let topIds = [];
+    try{
+      const r = await api(`/v1/admin/label-queue/stats/labelers/latest?window_days=${encodeURIComponent(windowDays)}&top=50`);
+      const j = await r.json();
+      document.getElementById('labNote').textContent = `window_days=${windowDays} · rows=${(j.items||[]).length}`;
+      const tb = document.querySelector('#labTable tbody');
+      tb.innerHTML = '';
+      (j.items||[]).forEach(row=>{
+        topIds.push(row.admin_user_id);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${(row.admin_email||("id:"+row.admin_user_id))}</td>
+          <td>${row.n_samples}</td>
+          <td>${row.mean_abs_error==null?'—':row.mean_abs_error.toFixed(4)}</td>
+          <td>${row.reliability==null?'—':row.reliability.toFixed(4)}</td>
+          <td>${row.weight==null?'—':row.weight.toFixed(4)}</td>
+          <td>${row.created_at}</td>
+        `;
+        tb.appendChild(tr);
+      });
+    }catch(e){
+      document.getElementById('labNote').textContent = String(e);
+    }
+
+    // labeler timeseries for top 10
+    try{
+      const r = await api(`/v1/admin/label-queue/stats/labelers/timeseries?days=${encodeURIComponent(days)}&window_days=${encodeURIComponent(windowDays)}&top=10`);
+      const j = await r.json();
+      const series = j.series || [];
+      if (!series.length){
+        document.getElementById('wNote').textContent = 'No timeseries data (run nightly snapshots).';
+        drawLineChart("chartWeights", [], [], {title:"weights"});
+        return;
       }
-      writeToBucket();
+      // chart: average weight across the series (per day) for quick health signal
+      const dayMap = new Map();
+      series.forEach(s=>{
+        (s.points||[]).forEach(p=>{
+          const d = p.date;
+          if (!dayMap.has(d)) dayMap.set(d, []);
+          if (p.weight!=null) dayMap.get(d).push(p.weight);
+        });
+      });
+      const daysSorted = Array.from(dayMap.keys()).sort();
+      const avgW = daysSorted.map(d=>{
+        const arr = dayMap.get(d) || [];
+        if (!arr.length) return null;
+        return arr.reduce((a,b)=>a+b,0)/arr.length;
+      });
+      drawLineChart("chartWeights", daysSorted, avgW, {title:"avg labeler weight (top 10)", minY:0.2, maxY:1.0, color:"rgba(124,92,255,0.95)"});
+      document.getElementById('wNote').textContent = `Series: ${series.length} labelers · days: ${daysSorted.length} · latest avg: ${(avgW[avgW.length-1]||0).toFixed(3)}`;
+    }catch(e){
+      document.getElementById('wNote').textContent = String(e);
     }
-  });
+  }
 
   // Auto-login
   (async ()=>{
