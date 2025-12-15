@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, List
 
 import torch
 import torch.nn as nn
@@ -15,11 +15,10 @@ import torch.nn as nn
 from sqlalchemy.orm import Session as OrmSession
 
 from .. import models
-from ..db import SessionLocal  # assume your db.py exposes SessionLocal; if not, update import accordingly
+from ..db import SessionLocal
 from ..storage import get_storage
 
-
-# ---- minimal resnet18 head (must match trainer) ----
+# ---- minimal resnet18 head (must match trainer architecture) ----
 try:
     from torchvision.models import resnet18
 except Exception as e:
@@ -36,7 +35,7 @@ class LoadedModel:
     model: nn.Module
 
 
-def _loads(s: str) -> dict:
+def _loads_json(s: str) -> dict:
     try:
         v = json.loads(s)
         return v if isinstance(v, dict) else {}
@@ -49,23 +48,17 @@ def _read_text_local(path: str) -> str:
         return f.read()
 
 
-def _read_bytes_local(path: str) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
-
-
 def _ensure_local(uri: str) -> Optional[str]:
     """
     Supports:
       - local filesystem path
-      - storage.get_local_path_if_any(uri) if uri is s3://...
+      - s3://... via storage.get_local_path_if_any(uri) cache
     """
     if not uri:
         return None
     if uri.startswith("s3://"):
         storage = get_storage()
-        lp = storage.get_local_path_if_any(uri)
-        return lp
+        return storage.get_local_path_if_any(uri)
     return uri
 
 
@@ -73,7 +66,7 @@ def _load_manifest(manifest_uri: str) -> dict:
     lp = _ensure_local(manifest_uri)
     if not lp or not os.path.exists(lp):
         raise RuntimeError(f"Manifest not accessible locally: {manifest_uri}")
-    return _loads(_read_text_local(lp))
+    return _loads_json(_read_text_local(lp))
 
 
 def _build_model(out_dim: int) -> nn.Module:
@@ -89,9 +82,12 @@ class ModelManager:
       - periodically query DB for active version
       - if changed, load and swap atomically
     """
+
     def __init__(self, *, check_interval_sec: float = 10.0, device: Optional[str] = None):
         self.check_interval_sec = float(check_interval_sec)
-        self.device = torch.device(device) if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device) if device else torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
 
         self._lock = threading.RLock()
         self._loaded: Optional[LoadedModel] = None
@@ -108,7 +104,7 @@ class ModelManager:
     def ensure_current(self) -> Optional[str]:
         """
         Ensures model matches DB active.
-        Returns active version or None if no active model.
+        Returns active version or None if no active model is set.
         """
         now = time.time()
         with self._lock:
@@ -130,7 +126,6 @@ class ModelManager:
             if cur == active_version:
                 return active_version
 
-            # reload
             loaded = self._load_from_artifact(active)
             with self._lock:
                 self._loaded = loaded
@@ -142,11 +137,13 @@ class ModelManager:
         manifest = _load_manifest(art.manifest_uri)
         label_keys = manifest.get("label_keys") or []
         image_size = int(manifest.get("image_size") or 224)
+
         if not isinstance(label_keys, list) or not label_keys:
             raise RuntimeError("Manifest missing label_keys; cannot load model")
 
         out_dim = len(label_keys)
         model = _build_model(out_dim)
+
         model_lp = _ensure_local(art.model_uri)
         if not model_lp or not os.path.exists(model_lp):
             raise RuntimeError(f"Model weights not accessible locally: {art.model_uri}")
@@ -160,7 +157,7 @@ class ModelManager:
             version=art.version,
             model_uri=art.model_uri,
             manifest_uri=art.manifest_uri,
-            label_keys=label_keys,
+            label_keys=[str(k) for k in label_keys],
             image_size=image_size,
             model=model,
         )
@@ -180,6 +177,7 @@ class ModelManager:
 
         x = x.to(self.device)
         y = m(x).detach().float().cpu().view(-1).tolist()
+
         out: Dict[str, float] = {}
         for k, v in zip(keys, y):
             try:
@@ -192,7 +190,7 @@ class ModelManager:
                 fv = 0.0
             if fv > 1.0:
                 fv = 1.0
-            out[str(k)] = fv
+            out[k] = fv
         return out
 
     def active_info(self) -> Dict[str, Any]:
@@ -207,8 +205,9 @@ class ModelManager:
                 "manifest_uri": self._loaded.manifest_uri,
                 "image_size": self._loaded.image_size,
                 "n_outputs": len(self._loaded.label_keys),
+                "device": str(self.device),
             }
 
 
-# singleton
+# singleton (shared by inference routes)
 MODEL_MANAGER = ModelManager(check_interval_sec=float(os.environ.get("MODEL_CHECK_INTERVAL_SEC", "10")))
