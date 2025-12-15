@@ -6,6 +6,7 @@ from .db import get_db
 from .config import settings
 from .security import rate_limit_or_429
 from . import models, schemas
+from .donation import store_roi_donation
 import httpx
 import os
 import json
@@ -17,10 +18,6 @@ router = APIRouter(prefix="/v1", tags=["analyze"])
 DISCLAIMER = "Cosmetic/appearance guidance only. Not a medical diagnosis or medical advice."
 
 def build_plan(attributes, quality):
-    """
-    Rule-based, non-diagnostic recommender that maps appearance attributes -> routine suggestions.
-    Uses conservative outputs when image quality is poor.
-    """
     s = {a["key"]: a["score"] for a in attributes}
 
     conservative = (
@@ -60,11 +57,9 @@ async def analyze(
     image: UploadFile = File(...),
     db: OrmSession = Depends(get_db)
 ):
-    # Rate limiting per session
     if not rate_limit_or_429(session_id):
         raise HTTPException(429, "Too many requests. Try again soon.")
 
-    # Basic validation
     if image.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(400, "Upload a JPG or PNG.")
 
@@ -72,17 +67,14 @@ async def analyze(
     if len(data) > settings.MAX_IMAGE_MB * 1024 * 1024:
         raise HTTPException(413, "Image too large.")
 
-    # Validate session
     s = db.get(models.Session, session_id)
     if not s:
         raise HTTPException(404, "Session not found")
 
-    # Consent (default: false/false)
     c = db.get(models.Consent, session_id)
     store_progress = bool(c.store_progress_images) if c else False
     donate = bool(c.donate_for_improvement) if c else False
 
-    # Call ML service. Ask it to return ROI jpeg (base64) so we can store ROI only (opt-in).
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             r = await client.post(
@@ -93,7 +85,6 @@ async def analyze(
     except httpx.RequestError:
         raise HTTPException(502, "Inference service unavailable")
 
-    # ML may reject if it can't isolate a usable ROI
     if r.status_code == 422:
         raise HTTPException(422, "Unable to isolate face/skin ROI. Try better lighting and a straight-on angle.")
     if r.status_code != 200:
@@ -107,7 +98,6 @@ async def analyze(
         "disclaimer": DISCLAIMER,
         "quality": payload["quality"],
         "attributes": payload["attributes"],
-        # NEW: include region breakdown
         "regions": payload.get("regions", []),
         "routine": plan["routine"],
         "professional_to_discuss": plan["pro"],
@@ -116,8 +106,9 @@ async def analyze(
         "stored_for_progress": False,
     }
 
-    # Decode ROI bytes (NOT the original upload) for storage
+    # Decode ROI bytes (NOT the original upload) for optional storage/donation
     roi_b64 = payload.get("roi_jpeg_b64")
+    roi_sha = payload.get("roi_sha256") or ""
     roi_bytes = None
     if roi_b64:
         try:
@@ -125,12 +116,11 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
-    # Store progress ONLY if user opted in AND server storage enabled AND we have ROI bytes
+    # Store progress (ROI-only) ONLY if user opted in AND server storage enabled
     if store_progress and settings.STORE_IMAGES_ENABLED and roi_bytes:
         os.makedirs(settings.IMAGE_STORE_DIR, exist_ok=True)
-
-        roi_sha = (payload.get("roi_sha256") or "")[:12]
-        fname = f"{uuid.uuid4()}_{roi_sha}.jpg" if roi_sha else f"{uuid.uuid4()}.jpg"
+        sha12 = roi_sha[:12] if roi_sha else ""
+        fname = f"{uuid.uuid4()}_{sha12}.jpg" if sha12 else f"{uuid.uuid4()}.jpg"
         fpath = os.path.join(settings.IMAGE_STORE_DIR, fname)
 
         with open(fpath, "wb") as f:
@@ -145,10 +135,21 @@ async def analyze(
         db.commit()
         resp["stored_for_progress"] = True
 
-    # Donate for improvement (placeholder)
-    # In production: enqueue ROI hash + metadata to a secure pipeline (only if opted in).
-    if donate:
-        # no-op in MVP
-        pass
+    # Donate for improvement (ROI-only) ONLY if user opted in
+    if donate and roi_bytes and roi_sha:
+        meta = {
+            "model_version": payload.get("model_version"),
+            "quality": payload.get("quality"),
+            "attributes": payload.get("attributes"),
+            "regions": payload.get("regions", []),
+        }
+        # Consent-gated storage + dedupe
+        store_roi_donation(
+            db=db,
+            session_id=session_id,
+            roi_sha256=roi_sha,
+            roi_bytes=roi_bytes,
+            metadata=meta,
+        )
 
     return resp
