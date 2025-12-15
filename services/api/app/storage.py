@@ -24,6 +24,9 @@ class Storage:
     def get_local_path_if_any(self, uri: str) -> Optional[str]:
         return None
 
+    def presign_get_url(self, uri: str, expires_sec: int = 900) -> Optional[str]:
+        return None
+
 
 class LocalStorage(Storage):
     def __init__(self, base_dir: str):
@@ -89,6 +92,21 @@ class S3Storage(Storage):
             return True
         except Exception:
             return False
+
+    def presign_get_url(self, uri: str, expires_sec: int = 900) -> Optional[str]:
+        p = urlparse(uri)
+        if p.scheme != "s3":
+            return None
+        bucket = p.netloc
+        key = p.path.lstrip("/")
+        try:
+            return self.s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=int(expires_sec),
+            )
+        except Exception:
+            return None
 
 
 _storage_singleton: Storage | None = None
