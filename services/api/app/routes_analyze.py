@@ -1,12 +1,14 @@
 # services/api/app/routes_analyze.py
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Header
 from sqlalchemy.orm import Session as OrmSession
 from .db import get_db
 from .config import settings
 from .security import rate_limit_or_429
 from . import models, schemas
 from .donation import store_roi_donation, store_progress_roi
+from .auth import require_user_auth
+
 import httpx
 import json
 import base64
@@ -17,16 +19,10 @@ DISCLAIMER = "Cosmetic/appearance guidance only. Not a medical diagnosis or medi
 
 def build_plan(attributes, quality):
     s = {a["key"]: a["score"] for a in attributes}
-
-    conservative = (
-        quality.get("lighting") != "ok"
-        or quality.get("blur") == "high"
-        or quality.get("angle") != "ok"
-    )
+    conservative = (quality.get("lighting") != "ok" or quality.get("blur") == "high" or quality.get("angle") != "ok")
 
     routine_am = ["Gentle cleanser", "Barrier moisturizer", "Broad-spectrum SPF 30+"]
     routine_pm = ["Gentle cleanser", "Moisturizer"]
-
     pro = []
     seek_care = ["Seek care for rapidly changing spots, bleeding lesions, severe pain, or persistent worsening."]
 
@@ -49,13 +45,17 @@ def build_plan(attributes, quality):
 
 @router.post("/analyze", response_model=schemas.AnalyzeResponse)
 async def analyze(
-    session_id: str,
+    session_id: str | None = None,
     image: UploadFile = File(...),
-    db: OrmSession = Depends(get_db)
+    db: OrmSession = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_device_token: str | None = Header(default=None),
 ):
+    # Auth (prod-safe)
+    session_id, _dvh = require_user_auth(db, session_id, authorization, x_device_token)
+
     if not rate_limit_or_429(session_id):
         raise HTTPException(429, "Too many requests. Try again soon.")
-
     if image.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(400, "Upload a JPG or PNG.")
 
@@ -73,11 +73,7 @@ async def analyze(
 
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
-            r = await client.post(
-                settings.ML_URL,
-                files={"image": data},
-                headers={"X-Return-ROI": "1"},
-            )
+            r = await client.post(settings.ML_URL, files={"image": data}, headers={"X-Return-ROI": "1"})
     except httpx.RequestError:
         raise HTTPException(502, "Inference service unavailable")
 
@@ -88,7 +84,6 @@ async def analyze(
 
     payload = r.json()
     roi_sha = payload.get("roi_sha256") or ""
-
     plan = build_plan(payload["attributes"], payload["quality"])
 
     resp = {
@@ -105,7 +100,6 @@ async def analyze(
         "donation": {"enabled": bool(donate_opt_in), "stored": False, "reason": None, "roi_sha256": roi_sha or None},
     }
 
-    # Decode ROI bytes from ML output
     roi_b64 = payload.get("roi_jpeg_b64")
     roi_bytes = None
     if roi_b64:
@@ -114,9 +108,8 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
-    # Store progress ROI if opted-in (ROI-only)
     if store_progress and roi_bytes:
-        stored, reason, _uri = store_progress_roi(
+        stored, _reason, _uri = store_progress_roi(
             db=db,
             session_id=session_id,
             roi_sha256=roi_sha,
@@ -125,7 +118,6 @@ async def analyze(
         )
         resp["stored_for_progress"] = bool(stored)
 
-    # Auto-donate (ROI-only) if opted-in
     if donate_opt_in:
         if not roi_bytes or not roi_sha:
             resp["donation"]["stored"] = False
