@@ -2,12 +2,14 @@
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Header
 from sqlalchemy.orm import Session as OrmSession
+
 from .db import get_db
 from .config import settings
 from .security import rate_limit_or_429
 from . import models, schemas
 from .donation import store_roi_donation, store_progress_roi
 from .auth import require_user_auth
+from .image_safety import sanitize_upload_image
 
 import httpx
 import json
@@ -51,18 +53,35 @@ async def analyze(
     authorization: str | None = Header(default=None),
     x_device_token: str | None = Header(default=None),
 ):
-    # Auth (prod-safe)
+    # Auth
     session_id, _dvh = require_user_auth(db, session_id, authorization, x_device_token)
 
+    # Rate limit
     if not rate_limit_or_429(session_id):
         raise HTTPException(429, "Too many requests. Try again soon.")
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(400, "Upload a JPG or PNG.")
 
-    data = await image.read()
-    if len(data) > settings.MAX_IMAGE_MB * 1024 * 1024:
+    raw = await image.read()
+    if len(raw) > settings.MAX_IMAGE_MB * 1024 * 1024:
         raise HTTPException(413, "Image too large.")
 
+    # Sanitize/normalize upload (sniff type, decode, strip EXIF, re-encode JPEG)
+    try:
+        sanitized = sanitize_upload_image(raw)
+    except ValueError as e:
+        code = str(e)
+        if code == "unsupported_image_type":
+            raise HTTPException(400, "Unsupported image type. Upload a JPEG or PNG.")
+        if code == "decode_failed":
+            raise HTTPException(400, "Could not decode image. Try exporting as a standard JPEG.")
+        if code == "image_too_small":
+            raise HTTPException(400, "Image too small. Move closer and ensure good lighting.")
+        if code == "too_many_pixels":
+            raise HTTPException(413, "Image resolution too large.")
+        raise HTTPException(400, "Invalid image.")
+    except Exception:
+        raise HTTPException(400, "Invalid image.")
+
+    # Load consent
     s = db.get(models.Session, session_id)
     if not s:
         raise HTTPException(404, "Session not found")
@@ -71,9 +90,14 @@ async def analyze(
     store_progress = bool(c.store_progress_images) if c else False
     donate_opt_in = bool(c.donate_for_improvement) if c else False
 
+    # Call ML with normalized JPEG bytes
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
-            r = await client.post(settings.ML_URL, files={"image": data}, headers={"X-Return-ROI": "1"})
+            r = await client.post(
+                settings.ML_URL,
+                files={"image": ("upload.jpg", sanitized.jpeg_bytes, "image/jpeg")},
+                headers={"X-Return-ROI": "1"},
+            )
     except httpx.RequestError:
         raise HTTPException(502, "Inference service unavailable")
 
@@ -100,6 +124,7 @@ async def analyze(
         "donation": {"enabled": bool(donate_opt_in), "stored": False, "reason": None, "roi_sha256": roi_sha or None},
     }
 
+    # Decode ROI bytes from ML output (already ROI-only)
     roi_b64 = payload.get("roi_jpeg_b64")
     roi_bytes = None
     if roi_b64:
@@ -108,6 +133,7 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
+    # Store progress ROI if opted-in
     if store_progress and roi_bytes:
         stored, _reason, _uri = store_progress_roi(
             db=db,
@@ -118,6 +144,7 @@ async def analyze(
         )
         resp["stored_for_progress"] = bool(stored)
 
+    # Auto-donate (ROI-only) if opted-in
     if donate_opt_in:
         if not roi_bytes or not roi_sha:
             resp["donation"]["stored"] = False
