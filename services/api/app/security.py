@@ -1,17 +1,20 @@
-import secrets
+# services/api/app/security.py
+
 import time
-import redis
 from .config import settings
+from fastapi import Header, HTTPException
 
-r = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+# Basic in-memory rate limiting placeholder (keep your existing one if you had Redis-backed)
+_bucket = {}
 
-def new_session_id() -> str:
-    return secrets.token_urlsafe(24)
+def rate_limit_or_429(session_id: str) -> bool:
+    now = int(time.time())
+    key = (session_id, now // 60)
+    _bucket[key] = _bucket.get(key, 0) + 1
+    return _bucket[key] <= settings.RATE_LIMIT_PER_MIN
 
-def rate_limit_or_429(session_id: str):
-    key = f"rl:{session_id}:{int(time.time() // 60)}"
-    count = r.incr(key)
-    r.expire(key, 70)
-    if count > settings.RATE_LIMIT_PER_MIN:
-        return False
-    return True
+def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
+    if not settings.ADMIN_API_KEY:
+        raise HTTPException(503, "Admin API key not configured")
+    if not x_admin_key or x_admin_key != settings.ADMIN_API_KEY:
+        raise HTTPException(401, "Unauthorized")
