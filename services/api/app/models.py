@@ -82,6 +82,10 @@ class ModelArtifact(Base):
     version: Mapped[str] = mapped_column(String, unique=True, index=True)
     model_uri: Mapped[str] = mapped_column(String)
     manifest_uri: Mapped[str] = mapped_column(String)
+
+    # NEW: separate markdown model card location (local path or s3://...)
+    model_card_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+
     metrics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
 
