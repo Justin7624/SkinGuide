@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     ADMIN_COOKIE_SAMESITE: str = "lax"    # "lax" recommended
     ADMIN_COOKIE_DOMAIN: str | None = None
 
+    # Password reset (email sending is out of scope; we scaffold token issuance)
+    PASSWORD_RESET_TTL_MIN: int = 30
+    PASSWORD_RESET_DEBUG_RETURN_TOKEN: bool = True  # set False in production
+
     MODEL_SHARED_DIR: str = "/models"
     MODEL_CURRENT_MANIFEST_PATH: str = "/models/current/manifest.json"
     MODEL_CURRENT_PT_PATH: str = "/models/current/model.pt"
