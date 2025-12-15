@@ -6,8 +6,9 @@ import json
 import os
 import threading
 import time
+import hashlib
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,7 +19,6 @@ from .. import models
 from ..db import SessionLocal
 from ..storage import get_storage
 
-# ---- minimal resnet18 head (must match trainer architecture) ----
 try:
     from torchvision.models import resnet18
 except Exception as e:
@@ -49,11 +49,6 @@ def _read_text_local(path: str) -> str:
 
 
 def _ensure_local(uri: str) -> Optional[str]:
-    """
-    Supports:
-      - local filesystem path
-      - s3://... via storage.get_local_path_if_any(uri) cache
-    """
     if not uri:
         return None
     if uri.startswith("s3://"):
@@ -75,12 +70,17 @@ def _build_model(out_dim: int) -> nn.Module:
     return m
 
 
+def _session_bucket(session_id: str, salt: str) -> int:
+    s = (session_id or "") + "|" + (salt or "")
+    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return int(h[:8], 16) % 100
+
+
 class ModelManager:
     """
-    Hot reload strategy:
-      - cache active model for CHECK_INTERVAL_SEC
-      - periodically query DB for active version
-      - if changed, load and swap atomically
+    Loads stable + (optional) canary model for staged rollout.
+    Stable = ModelArtifact where is_active=True
+    Canary = ModelDeployment.canary_model_id if enabled and canary_percent>0
     """
 
     def __init__(self, *, check_interval_sec: float = 10.0, device: Optional[str] = None):
@@ -88,12 +88,24 @@ class ModelManager:
         self.device = torch.device(device) if device else torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+        self.salt = os.environ.get("CANARY_ROLLOUT_SALT", "skinguide-default-salt")
 
         self._lock = threading.RLock()
-        self._loaded: Optional[LoadedModel] = None
         self._last_check = 0.0
 
-    def _db_get_active(self, db: OrmSession) -> Optional[models.ModelArtifact]:
+        # cached loaded models
+        self._stable: Optional[LoadedModel] = None
+        self._canary: Optional[LoadedModel] = None
+
+        # cached deployment config snapshot
+        self._deploy: Dict[str, Any] = {
+            "enabled": False,
+            "canary_percent": 0,
+            "canary_version": None,
+            "stable_version": None,
+        }
+
+    def _db_get_active_stable(self, db: OrmSession) -> Optional[models.ModelArtifact]:
         return (
             db.query(models.ModelArtifact)
             .filter(models.ModelArtifact.is_active == True)  # noqa: E712
@@ -101,35 +113,69 @@ class ModelManager:
             .first()
         )
 
-    def ensure_current(self) -> Optional[str]:
+    def _db_get_deployment(self, db: OrmSession) -> Optional[models.ModelDeployment]:
+        return db.query(models.ModelDeployment).order_by(models.ModelDeployment.id.asc()).first()
+
+    def ensure_current(self) -> Dict[str, Any]:
         """
-        Ensures model matches DB active.
-        Returns active version or None if no active model is set.
+        Refresh stable/canary model cache if needed.
+        Returns deployment snapshot including versions.
         """
         now = time.time()
         with self._lock:
             if (now - self._last_check) < self.check_interval_sec:
-                return self._loaded.version if self._loaded else None
+                return dict(self._deploy)
             self._last_check = now
 
         db = SessionLocal()
         try:
-            active = self._db_get_active(db)
-            if not active:
+            stable_art = self._db_get_active_stable(db)
+            dep = self._db_get_deployment(db)
+
+            stable_version = stable_art.version if stable_art else None
+
+            dep_enabled = bool(dep.enabled) if dep else False
+            canary_percent = int(dep.canary_percent) if dep else 0
+            canary_art = None
+            if dep and dep_enabled and canary_percent > 0 and dep.canary_model_id:
+                canary_art = db.get(models.ModelArtifact, int(dep.canary_model_id))
+
+            canary_version = canary_art.version if canary_art else None
+
+            # load stable if changed
+            if stable_art:
                 with self._lock:
-                    self._loaded = None
-                return None
+                    cur_stable = self._stable.version if self._stable else None
+                if cur_stable != stable_version:
+                    loaded = self._load_from_artifact(stable_art)
+                    with self._lock:
+                        self._stable = loaded
 
-            active_version = active.version
-            with self._lock:
-                cur = self._loaded.version if self._loaded else None
-            if cur == active_version:
-                return active_version
+            else:
+                with self._lock:
+                    self._stable = None
 
-            loaded = self._load_from_artifact(active)
+            # load canary if changed / disabled
+            if canary_art:
+                with self._lock:
+                    cur_canary = self._canary.version if self._canary else None
+                if cur_canary != canary_version:
+                    loaded = self._load_from_artifact(canary_art)
+                    with self._lock:
+                        self._canary = loaded
+            else:
+                with self._lock:
+                    self._canary = None
+
+            snap = {
+                "enabled": bool(dep_enabled),
+                "canary_percent": int(canary_percent),
+                "stable_version": stable_version,
+                "canary_version": canary_version,
+            }
             with self._lock:
-                self._loaded = loaded
-            return active_version
+                self._deploy = dict(snap)
+            return dict(snap)
         finally:
             db.close()
 
@@ -162,24 +208,51 @@ class ModelManager:
             model=model,
         )
 
-    @torch.no_grad()
-    def predict_tensor(self, x: torch.Tensor) -> Dict[str, float]:
-        """
-        x: [1,3,H,W] float32 0..1 resized to manifest image_size
-        returns dict mapping label key -> float (clamped 0..1)
-        """
-        self.ensure_current()
+    def choose_version_for_session(self, session_id: str) -> str | None:
+        snap = self.ensure_current()
+        stable_v = snap.get("stable_version")
+        canary_v = snap.get("canary_version")
+        if not stable_v:
+            return None
+
+        if snap.get("enabled") and canary_v and int(snap.get("canary_percent") or 0) > 0:
+            b = _session_bucket(session_id, self.salt)
+            if b < int(snap["canary_percent"]):
+                return canary_v
+        return stable_v
+
+    def _get_loaded_by_version(self, version: str) -> Optional[LoadedModel]:
         with self._lock:
-            if not self._loaded:
-                raise RuntimeError("No active model")
-            m = self._loaded.model
-            keys = self._loaded.label_keys
+            if self._stable and self._stable.version == version:
+                return self._stable
+            if self._canary and self._canary.version == version:
+                return self._canary
+            return None
+
+    @torch.no_grad()
+    def predict_tensor_for_session(self, session_id: str, x: torch.Tensor) -> Tuple[Dict[str, float], Dict[str, Any]]:
+        """
+        Returns (pred_dict, info)
+        info includes: version_used, stable_version, canary_version, canary_percent
+        """
+        snap = self.ensure_current()
+        version = self.choose_version_for_session(session_id)
+        if not version:
+            raise RuntimeError("No stable active model")
+
+        loaded = self._get_loaded_by_version(version)
+        if not loaded:
+            # rare race: force refresh and retry
+            self.ensure_current()
+            loaded = self._get_loaded_by_version(version)
+        if not loaded:
+            raise RuntimeError("Chosen model not loaded")
 
         x = x.to(self.device)
-        y = m(x).detach().float().cpu().view(-1).tolist()
+        y = loaded.model(x).detach().float().cpu().view(-1).tolist()
 
         out: Dict[str, float] = {}
-        for k, v in zip(keys, y):
+        for k, v in zip(loaded.label_keys, y):
             try:
                 fv = float(v)
             except Exception:
@@ -191,23 +264,40 @@ class ModelManager:
             if fv > 1.0:
                 fv = 1.0
             out[k] = fv
-        return out
+
+        info = {
+            "version_used": loaded.version,
+            "stable_version": snap.get("stable_version"),
+            "canary_version": snap.get("canary_version"),
+            "canary_percent": int(snap.get("canary_percent") or 0),
+            "deployment_enabled": bool(snap.get("enabled")),
+            "image_size": loaded.image_size,
+            "n_outputs": len(loaded.label_keys),
+            "device": str(self.device),
+        }
+        return out, info
 
     def active_info(self) -> Dict[str, Any]:
-        self.ensure_current()
+        snap = self.ensure_current()
         with self._lock:
-            if not self._loaded:
-                return {"active": False}
-            return {
-                "active": True,
-                "version": self._loaded.version,
-                "model_uri": self._loaded.model_uri,
-                "manifest_uri": self._loaded.manifest_uri,
-                "image_size": self._loaded.image_size,
-                "n_outputs": len(self._loaded.label_keys),
-                "device": str(self.device),
-            }
+            stable = self._stable
+            canary = self._canary
+        return {
+            "deployment": dict(snap),
+            "stable_loaded": bool(stable),
+            "canary_loaded": bool(canary),
+            "stable": {
+                "version": stable.version,
+                "image_size": stable.image_size,
+                "n_outputs": len(stable.label_keys),
+            } if stable else None,
+            "canary": {
+                "version": canary.version,
+                "image_size": canary.image_size,
+                "n_outputs": len(canary.label_keys),
+            } if canary else None,
+            "device": str(self.device),
+        }
 
 
-# singleton (shared by inference routes)
 MODEL_MANAGER = ModelManager(check_interval_sec=float(os.environ.get("MODEL_CHECK_INTERVAL_SEC", "10")))
