@@ -1,3 +1,5 @@
+# services/api/app/schemas.py
+
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 
@@ -12,6 +14,8 @@ AttributeKey = Literal[
     "dryness_flaking_appearance",
 ]
 
+RegionName = Literal["forehead", "left_cheek", "right_cheek", "nose", "chin"]
+
 class AttributeScore(BaseModel):
     key: AttributeKey
     score: float = Field(ge=0.0, le=1.0)
@@ -23,10 +27,25 @@ class QualityReport(BaseModel):
     angle: Literal["ok", "bad"]
     makeup_suspected: bool = False
 
+class BBox(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
+
+class RegionResult(BaseModel):
+    name: RegionName
+    bbox: BBox
+    skin_pixels: int = Field(ge=0)
+    quality: QualityReport
+    attributes: List[AttributeScore] = Field(default_factory=list)
+    status: Literal["ok", "insufficient_skin"] = "ok"
+
 class AnalyzeResponse(BaseModel):
     disclaimer: str
     quality: QualityReport
     attributes: List[AttributeScore]
+    regions: List[RegionResult] = Field(default_factory=list)
     routine: dict
     professional_to_discuss: List[str]
     when_to_seek_care: List[str]
@@ -40,3 +59,9 @@ class ConsentUpsert(BaseModel):
 class SessionCreateResponse(BaseModel):
     session_id: str
     store_images_default: bool
+
+class DonateResponse(BaseModel):
+    ok: bool
+    stored: bool
+    reason: Optional[str] = None
+    roi_sha256: Optional[str] = None
