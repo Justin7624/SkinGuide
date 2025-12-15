@@ -26,7 +26,7 @@ label_dep = Depends(require_role("labeler"))
 admin_dep = Depends(require_role("admin"))
 
 # --------------------------
-# Helpers
+# JSON helpers
 # --------------------------
 
 def _loads(s: str) -> Dict[str, Any]:
@@ -35,6 +35,12 @@ def _loads(s: str) -> Dict[str, Any]:
         return v if isinstance(v, dict) else {}
     except Exception:
         return {}
+
+def _dumps(payload: Any) -> str:
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return json.dumps({"_unserializable": True, "repr": repr(payload)}, ensure_ascii=False)
 
 def _float01(x: Any) -> Optional[float]:
     try:
@@ -59,15 +65,19 @@ def _mean(vals: List[float]) -> Optional[float]:
         return None
     return sum(vals) / float(len(vals))
 
+def _pairwise_abs_diffs(values: List[float]) -> List[float]:
+    diffs = []
+    for i in range(len(values)):
+        for j in range(i + 1, len(values)):
+            diffs.append(abs(values[i] - values[j]))
+    return diffs
+
 def _distinct_latest_submissions(
     subs: list[models.DonatedSampleLabel],
     *,
     n: int,
     non_skip: bool
 ) -> list[models.DonatedSampleLabel]:
-    """
-    Picks up to n latest submissions by distinct admins.
-    """
     out: list[models.DonatedSampleLabel] = []
     seen = set()
     for s in subs:
@@ -83,25 +93,11 @@ def _distinct_latest_submissions(
             break
     return out
 
-def _pairwise_abs_diffs(values: List[float]) -> List[float]:
-    diffs = []
-    for i in range(len(values)):
-        for j in range(i + 1, len(values)):
-            diffs.append(abs(values[i] - values[j]))
-    return diffs
-
 def _consensus_from_n(submissions: list[models.DonatedSampleLabel]) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]], Dict[str, Any]]:
-    """
-    Uses intersection of keys/regions across all provided submissions.
-    For N=2: mean; For N>=3: median.
-    """
     parsed = [_loads(s.labels_json) for s in submissions]
     N = len(parsed)
+    agg = _mean if N == 2 else _median
 
-    def agg(vals: List[float]) -> Optional[float]:
-        return _mean(vals) if N == 2 else _median(vals)
-
-    # Global labels
     label_dicts = []
     for p in parsed:
         ld = p.get("labels") if isinstance(p.get("labels"), dict) else {}
@@ -127,7 +123,6 @@ def _consensus_from_n(submissions: list[models.DonatedSampleLabel]) -> Tuple[Dic
         out_global[k] = float(agg(vals) or 0.0)
         diffs_all.extend(_pairwise_abs_diffs(vals))
 
-    # Per-region labels
     region_dicts = []
     for p in parsed:
         rd = p.get("region_labels") if isinstance(p.get("region_labels"), dict) else {}
@@ -173,9 +168,75 @@ def _consensus_from_n(submissions: list[models.DonatedSampleLabel]) -> Tuple[Dic
     }
     return out_global, out_regions, meta
 
-def _consensus_ready(db: OrmSession, donation_id: int) -> Tuple[bool, Dict[str, Any]]:
+def _thresholds_for_n(n: int) -> tuple[float, float]:
+    if n >= 3:
+        return float(settings.LABEL_MEAN_ABS_DIFF_MAX_N3), float(settings.LABEL_MAX_ABS_DIFF_MAX_N3)
+    return float(settings.LABEL_MEAN_ABS_DIFF_MAX), float(settings.LABEL_MAX_ABS_DIFF_MAX)
+
+# --------------------------
+# Consensus artifact writer
+# --------------------------
+
+def _write_consensus_artifact(
+    db: OrmSession,
+    *,
+    donated_sample_id: int,
+    status: str,
+    algorithm: str,
+    detail: Dict[str, Any],
+    used_submission_ids: list[int] | None,
+    request: Request | None,
+):
+    admin_user = getattr(request.state, "admin_user", None) if request is not None else None
+    admin_id = None
+    admin_email = None
+    if admin_user is not None:
+        try:
+            if int(getattr(admin_user, "id", 0)) > 0:
+                admin_id = int(admin_user.id)
+            admin_email = getattr(admin_user, "email", None)
+        except Exception:
+            pass
+
+    request_id = None
+    if request is not None:
+        request_id = getattr(request.state, "request_id", None) or request.headers.get("x-request-id")
+
+    art = models.ConsensusArtifact(
+        donated_sample_id=int(donated_sample_id),
+        created_at=datetime.utcnow(),
+        status=status,
+        algorithm=algorithm,
+        computed_by_admin_user_id=admin_id,
+        computed_by_admin_email=admin_email,
+        request_id=request_id,
+        artifact_json=_dumps(
+            {
+                "donated_sample_id": int(donated_sample_id),
+                "status": status,
+                "algorithm": algorithm,
+                "used_submission_ids": used_submission_ids or [],
+                "detail": detail,
+                "created_at": datetime.utcnow().isoformat(),
+            }
+        ),
+    )
+    db.add(art)
+
+# --------------------------
+# State classifier: conflict vs escalation vs ready
+# --------------------------
+
+def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
     """
-    Returns (ready, detail)
+    Returns a structured state dict:
+      - mode: "skip" | "label"
+      - conflict: bool (true => conflicts queue / admin review)
+      - escalate: bool (true => needs 3rd labeler)
+      - need_n: int
+      - have_non_skip: int distinct
+      - have_skip: int distinct
+      - reason / meta
     """
     subs = (
         db.query(models.DonatedSampleLabel)
@@ -183,47 +244,160 @@ def _consensus_ready(db: OrmSession, donation_id: int) -> Tuple[bool, Dict[str, 
         .order_by(desc(models.DonatedSampleLabel.created_at))
         .all()
     )
-    need_n = max(2, int(settings.LABEL_CONSENSUS_N))
 
-    non_skip = _distinct_latest_submissions(subs, n=need_n, non_skip=True)
-    skip = _distinct_latest_submissions(subs, n=need_n, non_skip=False)
+    base_n = max(2, int(settings.LABEL_CONSENSUS_N))
+    esc_n = max(3, int(settings.CONFLICT_ESCALATE_TO_N))
 
-    skip_distinct = len(skip)
-    non_skip_distinct = len(non_skip)
+    non_skip_distinct = _distinct_latest_submissions(subs, n=1000, non_skip=True)
+    skip_distinct = _distinct_latest_submissions(subs, n=1000, non_skip=False)
+    have_non_skip = len(non_skip_distinct)
+    have_skip = len(skip_distinct)
 
-    # Pure skip consensus
-    if skip_distinct >= need_n and non_skip_distinct == 0:
-        return True, {"mode": "skip", "need_n": need_n, "skip_distinct": skip_distinct}
+    # Mixed skip/label is a true conflict for review
+    if have_non_skip > 0 and have_skip > 0:
+        return {
+            "mode": "mixed",
+            "conflict": True,
+            "escalate": False,
+            "need_n": base_n,
+            "have_non_skip": have_non_skip,
+            "have_skip": have_skip,
+            "reason": "mixed_skip_and_label",
+        }
 
-    # Mixed skip/non-skip => conflict; do not auto finalize
-    if skip_distinct > 0 and non_skip_distinct > 0:
-        return False, {"mode": "mixed", "conflict": True, "need_n": need_n, "skip_distinct": skip_distinct, "non_skip_distinct": non_skip_distinct}
+    # Pure skip path
+    if have_skip >= base_n and have_non_skip == 0:
+        return {
+            "mode": "skip",
+            "conflict": False,
+            "escalate": False,
+            "need_n": base_n,
+            "have_non_skip": 0,
+            "have_skip": have_skip,
+            "ready": True,
+        }
 
-    if non_skip_distinct < need_n:
-        return False, {"mode": "label", "need_n": need_n, "non_skip_distinct": non_skip_distinct}
+    # Not enough non-skip yet
+    if have_non_skip < base_n:
+        return {
+            "mode": "label",
+            "conflict": False,
+            "escalate": False,
+            "need_n": base_n,
+            "have_non_skip": have_non_skip,
+            "have_skip": 0,
+            "ready": False,
+            "reason": "need_more_labels",
+        }
 
-    # Have enough non-skip labelers
-    g, r, meta = _consensus_from_n(non_skip[:need_n])
+    # Evaluate base consensus using latest base_n distinct
+    picked = _distinct_latest_submissions(subs, n=base_n, non_skip=True)
+    g, r, meta = _consensus_from_n(picked)
 
-    # Need overlap keys, otherwise not meaningful
     if meta.get("n_compared", 0) == 0:
-        return False, {"mode": "label", "need_n": need_n, "reason": "no_overlap_keys", "conflict": True, "meta": meta}
+        # no overlap keys is conflict; escalation might help
+        if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip < esc_n:
+            return {
+                "mode": "label",
+                "conflict": False,
+                "escalate": True,
+                "need_n": esc_n,
+                "have_non_skip": have_non_skip,
+                "have_skip": 0,
+                "reason": "no_overlap_keys_escalate",
+                "meta": meta,
+            }
+        return {
+            "mode": "label",
+            "conflict": True,
+            "escalate": False,
+            "need_n": base_n,
+            "have_non_skip": have_non_skip,
+            "have_skip": 0,
+            "reason": "no_overlap_keys",
+            "meta": meta,
+        }
 
-    # Disagreement gate
-    if float(meta.get("mean_abs_diff", 0.0)) > float(settings.LABEL_MEAN_ABS_DIFF_MAX) or float(meta.get("max_abs_diff", 0.0)) > float(settings.LABEL_MAX_ABS_DIFF_MAX):
-        return False, {"mode": "label", "need_n": need_n, "reason": "disagreement", "conflict": True, "meta": meta}
+    mean_max, abs_max = _thresholds_for_n(base_n)
+    if float(meta.get("mean_abs_diff", 0.0)) > mean_max or float(meta.get("max_abs_diff", 0.0)) > abs_max:
+        # Disagreement conflict: auto-escalate to third labeler when enabled (and not enough yet)
+        if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip < esc_n:
+            return {
+                "mode": "label",
+                "conflict": False,
+                "escalate": True,
+                "need_n": esc_n,
+                "have_non_skip": have_non_skip,
+                "have_skip": 0,
+                "reason": "disagreement_escalate_to_third",
+                "meta": meta,
+                "preview": {"labels": g, "region_labels": r},
+            }
 
-    return True, {"mode": "label", "need_n": need_n, "meta": meta, "preview": {"labels": g, "region_labels": r}}
+        # If already have >= esc_n, try N=esc_n finalize instead of conflict (median-of-3)
+        if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip >= esc_n:
+            picked3 = _distinct_latest_submissions(subs, n=esc_n, non_skip=True)
+            g3, r3, meta3 = _consensus_from_n(picked3)
+            mean3, max3 = _thresholds_for_n(esc_n)
+            if meta3.get("n_compared", 0) > 0 and float(meta3.get("mean_abs_diff", 0.0)) <= mean3 and float(meta3.get("max_abs_diff", 0.0)) <= max3:
+                return {
+                    "mode": "label",
+                    "conflict": False,
+                    "escalate": False,
+                    "need_n": esc_n,
+                    "have_non_skip": have_non_skip,
+                    "have_skip": 0,
+                    "ready": True,
+                    "meta": meta3,
+                    "preview": {"labels": g3, "region_labels": r3},
+                    "used_n": esc_n,
+                }
 
-def _finalize_if_consensus(db: OrmSession, donation: models.DonatedSample) -> Dict[str, Any]:
+        return {
+            "mode": "label",
+            "conflict": True,
+            "escalate": False,
+            "need_n": base_n,
+            "have_non_skip": have_non_skip,
+            "have_skip": 0,
+            "reason": "disagreement_conflict",
+            "meta": meta,
+            "preview": {"labels": g, "region_labels": r},
+        }
+
+    # Base consensus OK
+    return {
+        "mode": "label",
+        "conflict": False,
+        "escalate": False,
+        "need_n": base_n,
+        "have_non_skip": have_non_skip,
+        "have_skip": 0,
+        "ready": True,
+        "meta": meta,
+        "preview": {"labels": g, "region_labels": r},
+        "used_n": base_n,
+    }
+
+def _finalize_if_ready(db: OrmSession, donation: models.DonatedSample, request: Request | None) -> Dict[str, Any]:
     if donation.labels_json is not None:
         return {"finalized": True, "reason": "already_final"}
 
-    ready, detail = _consensus_ready(db, donation.id)
-    need_n = int(detail.get("need_n", max(2, int(settings.LABEL_CONSENSUS_N))))
+    state = _consensus_state(db, donation.id)
 
-    if not ready:
-        return {"finalized": False, "reason": detail.get("reason") or "not_ready", **detail}
+    # Persist an artifact for every finalize attempt decision
+    _write_consensus_artifact(
+        db,
+        donated_sample_id=donation.id,
+        status=("finalized" if state.get("ready") else ("escalated" if state.get("escalate") else ("conflict" if state.get("conflict") else "needs_more"))),
+        algorithm="median/mean_consensus",
+        detail=state,
+        used_submission_ids=[],
+        request=request,
+    )
+
+    if not state.get("ready"):
+        return {"finalized": False, **state}
 
     subs = (
         db.query(models.DonatedSampleLabel)
@@ -232,30 +406,41 @@ def _finalize_if_consensus(db: OrmSession, donation: models.DonatedSample) -> Di
         .all()
     )
 
-    if detail.get("mode") == "skip":
+    # skip consensus
+    if state.get("mode") == "skip":
+        need_n = int(state.get("need_n", 2))
         picked = _distinct_latest_submissions(subs, n=need_n, non_skip=False)
-        donation.labels_json = json.dumps(
+        donation.labels_json = _dumps(
             {
                 "skipped": True,
                 "reason": "consensus_skip",
                 "consensus": {
-                    "method": f"{need_n}_distinct_labelers",
-                    "from": [{"admin_user_id": s.admin_user_id, "created_at": s.created_at.isoformat()} for s in picked],
+                    "method": f"{need_n}_distinct_labelers_skip",
+                    "from": [{"admin_user_id": s.admin_user_id, "submission_id": s.id, "created_at": s.created_at.isoformat()} for s in picked],
                 },
                 "finalized_at": datetime.utcnow().isoformat(),
-            },
-            ensure_ascii=False,
+            }
         )
         donation.labeled_at = datetime.utcnow()
         db.add(donation)
-        return {"finalized": True, "reason": "consensus_skip"}
 
-    # label mode
-    picked = _distinct_latest_submissions(subs, n=need_n, non_skip=True)
-    g, r, meta = _consensus_from_n(picked[:need_n])
+        _write_consensus_artifact(
+            db,
+            donated_sample_id=donation.id,
+            status="skipped_final",
+            algorithm="skip_consensus",
+            detail={"need_n": need_n},
+            used_submission_ids=[s.id for s in picked],
+            request=request,
+        )
+        return {"finalized": True, "reason": "consensus_skip", "used_n": need_n}
 
-    # Only keep fitz/age if all agree (strict)
-    parsed = [_loads(s.labels_json) for s in picked[:need_n]]
+    # label consensus
+    used_n = int(state.get("used_n") or state.get("need_n") or max(2, int(settings.LABEL_CONSENSUS_N)))
+    picked = _distinct_latest_submissions(subs, n=used_n, non_skip=True)
+    g, r, meta = _consensus_from_n(picked)
+
+    parsed = [_loads(s.labels_json) for s in picked]
     fitz = parsed[0].get("fitzpatrick") if parsed else None
     age = parsed[0].get("age_band") if parsed else None
     for p in parsed[1:]:
@@ -270,69 +455,28 @@ def _finalize_if_consensus(db: OrmSession, donation: models.DonatedSample) -> Di
         "fitzpatrick": fitz,
         "age_band": age,
         "consensus": {
-            "method": meta.get("aggregation") + f"_of_{need_n}_distinct_labelers",
+            "method": (meta.get("aggregation") or "mean") + f"_of_{used_n}_distinct_labelers",
             "meta": meta,
-            "from": [{"admin_user_id": s.admin_user_id, "created_at": s.created_at.isoformat()} for s in picked[:need_n]],
+            "from": [{"admin_user_id": s.admin_user_id, "submission_id": s.id, "created_at": s.created_at.isoformat()} for s in picked],
         },
         "finalized_at": datetime.utcnow().isoformat(),
     }
-    donation.labels_json = json.dumps(final, ensure_ascii=False)
+
+    donation.labels_json = _dumps(final)
     donation.labeled_at = datetime.utcnow()
     db.add(donation)
-    return {"finalized": True, "reason": "consensus_ok", "meta": meta}
 
-def _conflict_reason(db: OrmSession, donation_id: int) -> Dict[str, Any]:
-    ready, detail = _consensus_ready(db, donation_id)
-    if ready:
-        return {"conflict": False}
-    # If detail says conflict or mixed/disagreement => conflict
-    if detail.get("conflict") or detail.get("mode") == "mixed" or detail.get("reason") in ("disagreement", "no_overlap_keys"):
-        return {"conflict": True, **detail}
-    return {"conflict": False, **detail}
+    _write_consensus_artifact(
+        db,
+        donated_sample_id=donation.id,
+        status="finalized",
+        algorithm="median/mean_consensus",
+        detail={"used_n": used_n, "meta": meta},
+        used_submission_ids=[s.id for s in picked],
+        request=request,
+    )
 
-# --------------------------
-# IRR helpers
-# --------------------------
-
-def _bin5(x01: float) -> int:
-    # 0..1 -> 0..4
-    x = max(0.0, min(1.0, float(x01)))
-    return min(4, int(x * 5.0))  # [0,1) -> 0..4 ; 1.0 -> 5 -> clipped
-
-def _weighted_kappa_quadratic(a: List[int], b: List[int], k: int = 5) -> Optional[float]:
-    """
-    Cohen's weighted kappa with quadratic weights on k categories.
-    """
-    if len(a) != len(b) or len(a) < 5:
-        return None
-    n = len(a)
-
-    # confusion matrix
-    O = [[0 for _ in range(k)] for __ in range(k)]
-    for i in range(n):
-        O[a[i]][b[i]] += 1
-
-    # marginals
-    ra = [sum(O[i][j] for j in range(k)) for i in range(k)]
-    cb = [sum(O[i][j] for i in range(k)) for j in range(k)]
-
-    # expected
-    E = [[(ra[i] * cb[j]) / float(n) for j in range(k)] for i in range(k)]
-
-    # weights: 1 - ((i-j)^2/(k-1)^2)
-    denom = float((k - 1) ** 2) if k > 1 else 1.0
-    W = [[1.0 - ((i - j) ** 2) / denom for j in range(k)] for i in range(k)]
-
-    num = 0.0
-    den = 0.0
-    for i in range(k):
-        for j in range(k):
-            num += W[i][j] * O[i][j]
-            den += W[i][j] * E[i][j]
-
-    if den == 0:
-        return None
-    return 1.0 - (num / den)
+    return {"finalized": True, "reason": "consensus_ok", "used_n": used_n, "meta": meta}
 
 # --------------------------
 # Schemas
@@ -348,7 +492,11 @@ class QueueItem(BaseModel):
 
     label_submissions: int = 0
     already_labeled_by_me: bool = False
+
     conflict: bool = False
+    escalate: bool = False
+    need_n: int = 2
+    have_non_skip: int = 0
     conflict_detail: dict = Field(default_factory=dict)
 
 class QueueResp(BaseModel):
@@ -380,44 +528,33 @@ class SubmissionsResp(BaseModel):
 class ForceFinalizeReq(BaseModel):
     final: dict = Field(default_factory=dict)
 
-class ConflictReviewResp(BaseModel):
-    donated_sample_id: int
-    roi_sha256: str
-    created_at: str
-    metadata_json: str
-    conflict_detail: dict = Field(default_factory=dict)
-    submissions: list[SubmissionRow] = Field(default_factory=list)
-    suggested_final: dict | None = None
+class LabelerStat(BaseModel):
+    admin_user_id: int
+    admin_email: str | None = None
+    n_samples: int
+    mean_abs_error: float | None = None
+    reliability: float | None = None
+    weight: float | None = None
 
-class IRRLabelStat(BaseModel):
-    key: str
-    n_pairs: int
-    mae: float | None = None
-    pearson_r: float | None = None
-    weighted_kappa_5bin: float | None = None
-
-class IRRResp(BaseModel):
+class LabelerStatsResp(BaseModel):
     days: int
-    samples_used: int
-    consensus_n: int
-    global_stats: list[IRRLabelStat] = Field(default_factory=list)
-    region_stats: list[IRRLabelStat] = Field(default_factory=list)
+    min_samples: int
+    items: list[LabelerStat] = Field(default_factory=list)
 
 # --------------------------
-# Core list endpoints
+# Queue endpoints
 # --------------------------
 
 @router.get("/next", response_model=QueueResp, dependencies=[read_dep])
 def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Request = None):
     """
-    Returns items needing labels (not finalized) and not withdrawn.
-    Excludes items already labeled by current admin.
+    Normal queue excludes true conflicts, but includes 'escalate' items (needs 3rd labeler).
     """
     limit = max(1, min(int(limit), 100))
     admin_user = getattr(request.state, "admin_user", None)
     my_id = int(admin_user.id) if admin_user and int(getattr(admin_user, "id", 0)) > 0 else None
 
-    fetch_n = limit * 4
+    fetch_n = limit * 6
     rows = (
         db.query(models.DonatedSample)
         .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
@@ -431,12 +568,10 @@ def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Reque
     items: list[QueueItem] = []
 
     for d in rows:
-        # skip conflicts here; those go to /conflicts
-        cinfo = _conflict_reason(db, d.id)
-        if cinfo.get("conflict"):
-            continue
+        state = _consensus_state(db, d.id)
+        if state.get("conflict"):
+            continue  # true conflicts go to /conflicts
 
-        # exclude already labeled by me
         already_by_me = False
         if my_id is not None:
             exists = (
@@ -471,7 +606,10 @@ def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Reque
                 label_submissions=sub_count,
                 already_labeled_by_me=already_by_me,
                 conflict=False,
-                conflict_detail={},
+                escalate=bool(state.get("escalate")),
+                need_n=int(state.get("need_n", 2)),
+                have_non_skip=int(state.get("have_non_skip", 0)),
+                conflict_detail=state,
             )
         )
         if len(items) >= limit:
@@ -480,14 +618,9 @@ def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Reque
     return QueueResp(items=items)
 
 @router.get("/conflicts", response_model=QueueResp, dependencies=[read_dep])
-def conflict_items(
-    limit: int = 50,
-    db: OrmSession = Depends(get_db),
-    request: Request = None
-):
+def conflict_items(limit: int = 50, db: OrmSession = Depends(get_db), request: Request = None):
     """
-    Dedicated conflicts queue: items not finalized but currently in conflict
-    (mixed skip/label, disagreement, no-overlap, etc).
+    True conflicts: mixed skip/label OR disagreement after escalation threshold met (or escalation disabled).
     """
     limit = max(1, min(int(limit), 200))
 
@@ -497,7 +630,7 @@ def conflict_items(
         .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
         .filter(models.DonatedSample.labels_json.is_(None))
         .order_by(asc(models.DonatedSample.created_at))
-        .limit(limit * 6)
+        .limit(limit * 10)
         .all()
     )
 
@@ -506,11 +639,10 @@ def conflict_items(
 
     out: list[QueueItem] = []
     for d in rows:
-        cinfo = _conflict_reason(db, d.id)
-        if not cinfo.get("conflict"):
+        state = _consensus_state(db, d.id)
+        if not state.get("conflict"):
             continue
 
-        # show even if already labeled by me (useful for review), but flag it
         already_by_me = False
         if my_id is not None:
             exists = (
@@ -543,7 +675,10 @@ def conflict_items(
                 label_submissions=sub_count,
                 already_labeled_by_me=already_by_me,
                 conflict=True,
-                conflict_detail=cinfo,
+                escalate=False,
+                need_n=int(state.get("need_n", 2)),
+                have_non_skip=int(state.get("have_non_skip", 0)),
+                conflict_detail=state,
             )
         )
         if len(out) >= limit:
@@ -600,60 +735,8 @@ def submissions(donation_id: int, db: OrmSession = Depends(get_db)):
         ],
     )
 
-@router.get("/{donation_id}/review", response_model=ConflictReviewResp, dependencies=[read_dep])
-def conflict_review(donation_id: int, db: OrmSession = Depends(get_db)):
-    d = db.get(models.DonatedSample, int(donation_id))
-    if not d or d.is_withdrawn:
-        raise HTTPException(404, "Not found")
-    if d.labels_json is not None:
-        raise HTTPException(409, "Already finalized")
-
-    cinfo = _conflict_reason(db, d.id)
-
-    subs = (
-        db.query(models.DonatedSampleLabel)
-        .filter(models.DonatedSampleLabel.donated_sample_id == d.id)
-        .order_by(desc(models.DonatedSampleLabel.created_at))
-        .all()
-    )
-    admin_ids = list({s.admin_user_id for s in subs})
-    admins = {}
-    if admin_ids:
-        for u in db.query(models.AdminUser).filter(models.AdminUser.id.in_(admin_ids)).all():
-            admins[u.id] = u.email
-
-    # suggested final:
-    suggested = None
-    need_n = max(2, int(settings.LABEL_CONSENSUS_N))
-    non_skip = _distinct_latest_submissions(subs, n=need_n, non_skip=True)
-    if len(non_skip) >= 2:
-        # even if conflict, we can provide a suggested median-of-up-to-N
-        picked = non_skip[: min(len(non_skip), need_n)]
-        g, r, meta = _consensus_from_n(picked)
-        suggested = {"labels": g, "region_labels": r, "suggested_meta": meta}
-
-    return ConflictReviewResp(
-        donated_sample_id=d.id,
-        roi_sha256=d.roi_sha256,
-        created_at=d.created_at.isoformat(),
-        metadata_json=d.metadata_json or "",
-        conflict_detail=cinfo,
-        submissions=[
-            SubmissionRow(
-                id=s.id,
-                created_at=s.created_at.isoformat(),
-                admin_user_id=s.admin_user_id,
-                admin_email=admins.get(s.admin_user_id),
-                is_skip=bool(s.is_skip),
-                labels_json=s.labels_json,
-            )
-            for s in subs
-        ],
-        suggested_final=suggested,
-    )
-
 # --------------------------
-# Submit label/skip + finalize attempt
+# Label submit + skip + force finalize
 # --------------------------
 
 @router.post("/{donation_id}/label", dependencies=[label_dep])
@@ -690,7 +773,7 @@ def label_item(donation_id: int, payload: LabelReq, request: Request, db: OrmSes
         admin_user_id=int(admin_user.id),
         created_at=datetime.utcnow(),
         is_skip=False,
-        labels_json=json.dumps(submission, ensure_ascii=False),
+        labels_json=_dumps(submission),
     )
     db.add(rec)
 
@@ -704,7 +787,7 @@ def label_item(donation_id: int, payload: LabelReq, request: Request, db: OrmSes
     )
 
     db.flush()
-    finalize_info = _finalize_if_consensus(db, d)
+    finalize_info = _finalize_if_ready(db, d, request)
 
     log_audit(
         db,
@@ -746,7 +829,7 @@ def skip_item(donation_id: int, payload: SkipReq, request: Request, db: OrmSessi
         admin_user_id=int(admin_user.id),
         created_at=datetime.utcnow(),
         is_skip=True,
-        labels_json=json.dumps(submission, ensure_ascii=False),
+        labels_json=_dumps(submission),
     )
     db.add(rec)
 
@@ -760,7 +843,7 @@ def skip_item(donation_id: int, payload: SkipReq, request: Request, db: OrmSessi
     )
 
     db.flush()
-    finalize_info = _finalize_if_consensus(db, d)
+    finalize_info = _finalize_if_ready(db, d, request)
 
     log_audit(
         db,
@@ -782,17 +865,26 @@ def force_finalize(donation_id: int, payload: ForceFinalizeReq, request: Request
     if not isinstance(payload.final, dict) or not payload.final:
         raise HTTPException(400, "final must be a non-empty object")
 
-    d.labels_json = json.dumps(
+    d.labels_json = _dumps(
         {
             **payload.final,
             "finalized_at": datetime.utcnow().isoformat(),
             "finalized_by": getattr(getattr(request.state, "admin_user", None), "email", None),
             "finalized_via": "force_finalize",
-        },
-        ensure_ascii=False,
+        }
     )
     d.labeled_at = datetime.utcnow()
     db.add(d)
+
+    _write_consensus_artifact(
+        db,
+        donated_sample_id=d.id,
+        status="finalized",
+        algorithm="force_finalize",
+        detail={"note": "admin override"},
+        used_submission_ids=[],
+        request=request,
+    )
 
     log_audit(
         db,
@@ -807,142 +899,128 @@ def force_finalize(donation_id: int, payload: ForceFinalizeReq, request: Request
     return {"ok": True}
 
 # --------------------------
-# IRR stats endpoint
+# Labeler reliability stats (for trainer weighting)
 # --------------------------
 
-@router.get("/stats/irr", response_model=IRRResp, dependencies=[read_dep])
-def irr_stats(
-    days: int = Query(default=30, ge=1, le=3650),
+def _flatten_labels(j: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    labels = j.get("labels") if isinstance(j.get("labels"), dict) else {}
+    for k, v in labels.items():
+        fv = _float01(v)
+        if fv is not None:
+            out[f"g:{k}"] = fv
+
+    regions = j.get("region_labels") if isinstance(j.get("region_labels"), dict) else {}
+    for region, d in regions.items():
+        if not isinstance(d, dict):
+            continue
+        for k, v in d.items():
+            fv = _float01(v)
+            if fv is not None:
+                out[f"r:{region}:{k}"] = fv
+    return out
+
+def _mae_between(a: Dict[str, float], b: Dict[str, float]) -> Optional[float]:
+    keys = set(a.keys()) & set(b.keys())
+    if not keys:
+        return None
+    return sum(abs(a[k] - b[k]) for k in keys) / float(len(keys))
+
+def _weight_from_mae(mae: float) -> float:
+    # reliability: 1 - MAE; weight range [0.2, 1.0]
+    rel = max(0.0, min(1.0, 1.0 - float(mae)))
+    return 0.2 + 0.8 * rel
+
+@router.get("/stats/labelers", response_model=LabelerStatsResp, dependencies=[read_dep])
+def labeler_stats(
+    days: int = Query(default=180, ge=7, le=3650),
+    min_samples: int = Query(default=10, ge=1, le=5000),
     db: OrmSession = Depends(get_db),
 ):
     """
-    Computes inter-rater reliability on raw submissions:
-      - MAE and Pearson r over continuous 0..1 values (pairwise, 2 raters)
-      - weighted kappa on 5-bin discretization (quadratic weights)
-    Uses latest 2 distinct non-skip submissions per sample within window.
+    Computes per-labeler MAE against finalized consensus for samples they participated in.
+    Trainer can use this endpoint OR replicate logic in-service.
     """
     cutoff = datetime.utcnow() - timedelta(days=int(days))
-    max_samples = int(settings.IRR_MAX_SAMPLES)
 
-    # candidate samples with >=2 non-skip distinct labelers
-    # We do a two-step approach:
-    #  1) collect sample ids with submissions within cutoff
-    sample_ids = (
-        db.query(models.DonatedSampleLabel.donated_sample_id)
-        .filter(models.DonatedSampleLabel.created_at >= cutoff)
-        .filter(models.DonatedSampleLabel.is_skip == False)  # noqa: E712
-        .group_by(models.DonatedSampleLabel.donated_sample_id)
-        .having(func.count(func.distinct(models.DonatedSampleLabel.admin_user_id)) >= 2)
-        .limit(max_samples)
+    # Finalized samples in window
+    donations = (
+        db.query(models.DonatedSample)
+        .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
+        .filter(models.DonatedSample.labels_json.isnot(None))
+        .filter(models.DonatedSample.labeled_at.isnot(None))
+        .filter(models.DonatedSample.labeled_at >= cutoff)
+        .order_by(desc(models.DonatedSample.labeled_at))
+        .limit(20000)
         .all()
     )
-    sample_ids = [int(x[0]) for x in sample_ids]
 
-    if not sample_ids:
-        return IRRResp(days=int(days), samples_used=0, consensus_n=int(settings.LABEL_CONSENSUS_N))
+    # Accumulate per admin
+    sums: Dict[int, float] = {}
+    counts: Dict[int, int] = {}
+    emails: Dict[int, str] = {}
 
-    # collect latest submissions for each sample
-    global_pairs: Dict[str, List[Tuple[float, float]]] = {}
-    region_pairs: Dict[str, List[Tuple[float, float]]] = {}
-    kappa_global: Dict[str, List[Tuple[int, int]]] = {}
-    kappa_region: Dict[str, List[Tuple[int, int]]] = {}
+    # cache admin emails
+    for u in db.query(models.AdminUser).all():
+        emails[u.id] = u.email
 
-    for sid in sample_ids:
-        subs = (
-            db.query(models.DonatedSampleLabel)
-            .filter(models.DonatedSampleLabel.donated_sample_id == sid)
-            .filter(models.DonatedSampleLabel.created_at >= cutoff)
-            .order_by(desc(models.DonatedSampleLabel.created_at))
-            .all()
-        )
-        picked = _distinct_latest_submissions(subs, n=2, non_skip=True)
-        if len(picked) < 2:
+    for d in donations:
+        try:
+            final = json.loads(d.labels_json or "{}")
+        except Exception:
             continue
-        a = _loads(picked[0].labels_json)
-        b = _loads(picked[1].labels_json)
+        final_flat = _flatten_labels(final)
+        cons = final.get("consensus") if isinstance(final.get("consensus"), dict) else {}
+        frm = cons.get("from") if isinstance(cons.get("from"), list) else []
+        admin_ids = []
+        for item in frm:
+            if isinstance(item, dict) and "admin_user_id" in item:
+                try:
+                    admin_ids.append(int(item["admin_user_id"]))
+                except Exception:
+                    pass
+        admin_ids = list({x for x in admin_ids if x > 0})
+        if not admin_ids:
+            continue
 
-        la = a.get("labels") if isinstance(a.get("labels"), dict) else {}
-        lb = b.get("labels") if isinstance(b.get("labels"), dict) else {}
-        common = set(la.keys()) & set(lb.keys())
-        for k in common:
-            va = _float01(la.get(k))
-            vb = _float01(lb.get(k))
-            if va is None or vb is None:
+        # Compare each admin's submission to final
+        for aid in admin_ids:
+            sub = (
+                db.query(models.DonatedSampleLabel)
+                .filter(models.DonatedSampleLabel.donated_sample_id == d.id)
+                .filter(models.DonatedSampleLabel.admin_user_id == aid)
+                .filter(models.DonatedSampleLabel.is_skip == False)  # noqa: E712
+                .order_by(desc(models.DonatedSampleLabel.created_at))
+                .first()
+            )
+            if not sub:
                 continue
-            global_pairs.setdefault(k, []).append((va, vb))
-            kappa_global.setdefault(k, []).append((_bin5(va), _bin5(vb)))
+            try:
+                sj = json.loads(sub.labels_json or "{}")
+            except Exception:
+                continue
+            sub_flat = _flatten_labels(sj)
+            m = _mae_between(final_flat, sub_flat)
+            if m is None:
+                continue
+            sums[aid] = sums.get(aid, 0.0) + float(m)
+            counts[aid] = counts.get(aid, 0) + 1
 
-        ra = a.get("region_labels") if isinstance(a.get("region_labels"), dict) else {}
-        rb = b.get("region_labels") if isinstance(b.get("region_labels"), dict) else {}
-        r_common = set(ra.keys()) & set(rb.keys())
-        for region in r_common:
-            da = ra.get(region) if isinstance(ra.get(region), dict) else {}
-            dbb = rb.get(region) if isinstance(rb.get(region), dict) else {}
-            keys = set(da.keys()) & set(dbb.keys())
-            for k in keys:
-                va = _float01(da.get(k))
-                vb = _float01(dbb.get(k))
-                if va is None or vb is None:
-                    continue
-                rk = f"{region}.{k}"
-                region_pairs.setdefault(rk, []).append((va, vb))
-                kappa_region.setdefault(rk, []).append((_bin5(va), _bin5(vb)))
-
-    def pearson(xs: List[float], ys: List[float]) -> Optional[float]:
-        n = len(xs)
-        if n < 5:
-            return None
-        mx = sum(xs) / n
-        my = sum(ys) / n
-        num = sum((xs[i]-mx)*(ys[i]-my) for i in range(n))
-        denx = sum((xs[i]-mx)**2 for i in range(n))
-        deny = sum((ys[i]-my)**2 for i in range(n))
-        den = (denx * deny) ** 0.5
-        if den == 0:
-            return None
-        return num / den
-
-    def mae(pairs: List[Tuple[float, float]]) -> Optional[float]:
-        if len(pairs) < 5:
-            return None
-        return sum(abs(a-b) for a,b in pairs) / float(len(pairs))
-
-    global_stats: List[IRRLabelStat] = []
-    for k, pairs in sorted(global_pairs.items()):
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        kap_pairs = kappa_global.get(k, [])
-        kap = _weighted_kappa_quadratic([x for x,_ in kap_pairs], [y for _,y in kap_pairs], k=5) if kap_pairs else None
-        global_stats.append(
-            IRRLabelStat(
-                key=k,
-                n_pairs=len(pairs),
-                mae=mae(pairs),
-                pearson_r=pearson(xs, ys),
-                weighted_kappa_5bin=kap,
+    items: list[LabelerStat] = []
+    for aid, n in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+        if n < int(min_samples):
+            continue
+        mae = sums.get(aid, 0.0) / float(n)
+        rel = max(0.0, min(1.0, 1.0 - mae))
+        items.append(
+            LabelerStat(
+                admin_user_id=aid,
+                admin_email=emails.get(aid),
+                n_samples=int(n),
+                mean_abs_error=float(round(mae, 4)),
+                reliability=float(round(rel, 4)),
+                weight=float(round(_weight_from_mae(mae), 4)),
             )
         )
 
-    region_stats: List[IRRLabelStat] = []
-    for rk, pairs in sorted(region_pairs.items()):
-        xs = [p[0] for p in pairs]
-        ys = [p[1] for p in pairs]
-        kap_pairs = kappa_region.get(rk, [])
-        kap = _weighted_kappa_quadratic([x for x,_ in kap_pairs], [y for _,y in kap_pairs], k=5) if kap_pairs else None
-        region_stats.append(
-            IRRLabelStat(
-                key=rk,
-                n_pairs=len(pairs),
-                mae=mae(pairs),
-                pearson_r=pearson(xs, ys),
-                weighted_kappa_5bin=kap,
-            )
-        )
-
-    return IRRResp(
-        days=int(days),
-        samples_used=len(sample_ids),
-        consensus_n=int(settings.LABEL_CONSENSUS_N),
-        global_stats=global_stats,
-        region_stats=region_stats,
-    )
+    return LabelerStatsResp(days=int(days), min_samples=int(min_samples), items=items)
