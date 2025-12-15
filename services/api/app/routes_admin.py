@@ -285,99 +285,72 @@ def models_table(db: OrmSession = Depends(get_db)):
         ],
     )
 
-# CSV exports (unchanged behavior, now RBAC-protected)
+# --------------------------
+# CSV exports
+# --------------------------
+
 @router.get("/export/audit.csv")
-def export_audit_csv(since_days: int | None = Query(default=7, ge=1, le=365), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
+def export_audit_csv(
+    since_days: int | None = Query(default=7, ge=1, le=365),
+    limit: int = Query(default=200000, ge=1, le=500000),
+    db: OrmSession = Depends(get_db)
+):
     cutoff = datetime.utcnow() - timedelta(days=int(since_days or 7))
-    q = db.query(models.AuditEvent).filter(models.AuditEvent.created_at >= cutoff).order_by(desc(models.AuditEvent.id)).limit(int(limit))
-    header = ["id", "created_at", "event_type", "session_id", "request_id", "client_ip", "payload_json"]
+    q = (
+        db.query(models.AuditEvent)
+        .filter(models.AuditEvent.created_at >= cutoff)
+        .order_by(desc(models.AuditEvent.id))
+        .limit(int(limit))
+    )
+    header = [
+        "id","created_at","event_type","actor_type","admin_user_id","admin_email",
+        "session_id","request_id","client_ip","user_agent","path","method","status_code",
+        "payload_json"
+    ]
 
     def rows():
         for r in q:
-            yield [str(r.id), r.created_at.isoformat(), r.event_type, r.session_id or "", r.request_id or "", r.client_ip or "", r.payload_json or ""]
+            yield [
+                str(r.id),
+                r.created_at.isoformat(),
+                r.event_type,
+                r.actor_type or "",
+                str(r.admin_user_id or ""),
+                r.admin_email or "",
+                r.session_id or "",
+                r.request_id or "",
+                r.client_ip or "",
+                r.user_agent or "",
+                r.path or "",
+                r.method or "",
+                str(r.status_code or ""),
+                r.payload_json or "",
+            ]
     return _csv_stream(header, rows())
 
-@router.get("/export/sessions.csv")
-def export_sessions_csv(since_days: int | None = Query(default=30, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
-    cutoff = datetime.utcnow() - timedelta(days=int(since_days or 30))
-    q = db.query(models.Session).filter(models.Session.created_at >= cutoff).order_by(desc(models.Session.created_at)).limit(int(limit))
-    header = ["id", "created_at", "has_device_binding"]
+@router.get("/export/label_submissions.csv")
+def export_label_submissions_csv(
+    since_days: int | None = Query(default=365, ge=1, le=3650),
+    limit: int = Query(default=200000, ge=1, le=500000),
+    db: OrmSession = Depends(get_db)
+):
+    cutoff = datetime.utcnow() - timedelta(days=int(since_days or 365))
+    q = (
+        db.query(models.DonatedSampleLabel)
+        .filter(models.DonatedSampleLabel.created_at >= cutoff)
+        .order_by(desc(models.DonatedSampleLabel.created_at))
+        .limit(int(limit))
+    )
+    header = ["id","created_at","donated_sample_id","admin_user_id","is_skip","labels_json"]
 
     def rows():
         for s in q:
-            yield [s.id, s.created_at.isoformat(), "1" if (s.device_token_hash is not None) else "0"]
-    return _csv_stream(header, rows())
-
-@router.get("/export/consents.csv")
-def export_consents_csv(limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
-    q = db.query(models.Consent).order_by(desc(models.Consent.updated_at)).limit(int(limit))
-    header = ["session_id","store_progress_images","donate_for_improvement","accepted_privacy_version","accepted_terms_version","accepted_consent_version","accepted_at","updated_at"]
-
-    def rows():
-        for c in q:
             yield [
-                c.session_id,
-                "1" if c.store_progress_images else "0",
-                "1" if c.donate_for_improvement else "0",
-                c.accepted_privacy_version or "",
-                c.accepted_terms_version or "",
-                c.accepted_consent_version or "",
-                c.accepted_at.isoformat() if c.accepted_at else "",
-                c.updated_at.isoformat(),
+                str(s.id),
+                s.created_at.isoformat(),
+                str(s.donated_sample_id),
+                str(s.admin_user_id),
+                "1" if s.is_skip else "0",
+                s.labels_json,
             ]
-    return _csv_stream(header, rows())
-
-@router.get("/export/donations.csv")
-def export_donations_csv(since_days: int | None = Query(default=90, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
-    cutoff = datetime.utcnow() - timedelta(days=int(since_days or 90))
-    q = db.query(models.DonatedSample).filter(models.DonatedSample.created_at >= cutoff).order_by(desc(models.DonatedSample.created_at)).limit(int(limit))
-    header = ["id","session_id","created_at","roi_sha256","roi_image_path","is_withdrawn","withdrawn_at","has_labels","labeled_at"]
-
-    def rows():
-        for d in q:
-            yield [
-                str(d.id), d.session_id, d.created_at.isoformat(), d.roi_sha256, d.roi_image_path,
-                "1" if d.is_withdrawn else "0",
-                d.withdrawn_at.isoformat() if d.withdrawn_at else "",
-                "1" if (d.labels_json is not None) else "0",
-                d.labeled_at.isoformat() if d.labeled_at else "",
-            ]
-    return _csv_stream(header, rows())
-
-@router.get("/export/labels.csv")
-def export_labels_csv(since_days: int | None = Query(default=365, ge=1, le=3650), limit: int = Query(default=200000, ge=1, le=500000), db: OrmSession = Depends(get_db)):
-    cutoff = datetime.utcnow() - timedelta(days=int(since_days or 365))
-    q = (
-        db.query(models.DonatedSample)
-        .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
-        .filter(models.DonatedSample.labels_json.isnot(None))
-        .filter(models.DonatedSample.labeled_at.isnot(None))
-        .filter(models.DonatedSample.labeled_at >= cutoff)
-        .order_by(desc(models.DonatedSample.labeled_at))
-        .limit(int(limit))
-    )
-    header = ["id","roi_sha256","session_id","labeled_at","fitzpatrick","age_band","labels_json"]
-
-    def rows():
-        for d in q:
-            fitz = ""
-            age = ""
-            labels_json = d.labels_json or ""
-            try:
-                j = json.loads(labels_json) if labels_json else {}
-                fitz = str(j.get("fitzpatrick") or "")
-                age = str(j.get("age_band") or "")
-            except Exception:
-                pass
-            yield [str(d.id), d.roi_sha256, d.session_id, d.labeled_at.isoformat() if d.labeled_at else "", fitz, age, labels_json]
-    return _csv_stream(header, rows())
-
-@router.get("/export/models.csv")
-def export_models_csv(limit: int = Query(default=10000, ge=1, le=100000), db: OrmSession = Depends(get_db)):
-    q = db.query(models.ModelArtifact).order_by(desc(models.ModelArtifact.created_at)).limit(int(limit))
-    header = ["version","created_at","is_active","model_uri","manifest_uri","metrics_json"]
-
-    def rows():
-        for m in q:
-            yield [m.version, m.created_at.isoformat(), "1" if m.is_active else "0", m.model_uri, m.manifest_uri, m.metrics_json or ""]
     return _csv_stream(header, rows())
