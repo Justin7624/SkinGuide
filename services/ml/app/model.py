@@ -1,4 +1,9 @@
-import os, torch, random
+# services/ml/app/model.py
+
+import os
+import torch
+import numpy as np
+import cv2
 
 ATTRIBUTE_KEYS = [
     "uneven_tone_appearance",
@@ -23,16 +28,33 @@ class InferenceModel:
             except Exception:
                 self.torch_model = None
 
+    def _preprocess(self, img_bgr):
+        img = cv2.resize(img_bgr, (128, 128), interpolation=cv2.INTER_AREA)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        x = img.astype(np.float32) / 255.0
+        x = np.transpose(x, (2, 0, 1))  # CHW
+        x = np.expand_dims(x, 0)        # NCHW
+        return torch.from_numpy(x)
+
     def infer(self, img_bgr):
-        # If a real torchscript model is loaded, call it here.
-        # MVP: deterministic-ish pseudo outputs to keep API stable.
-        rnd = random.Random(int(img_bgr.sum()) % 10_000_000)
+        if self.torch_model is None:
+            # Fallback: neutral-ish outputs when no trained model is present
+            out = []
+            for k in ATTRIBUTE_KEYS:
+                out.append({"key": k, "score": 0.5, "confidence": 0.4})
+            return out
+
+        with torch.no_grad():
+            x = self._preprocess(img_bgr)
+            logits = self.torch_model(x)
+            scores = torch.sigmoid(logits).cpu().numpy().reshape(-1)
 
         out = []
-        for k in ATTRIBUTE_KEYS:
-            score = rnd.random()
-            conf = 0.45 + 0.4 * rnd.random()
-            out.append({"key": k, "score": round(score, 4), "confidence": round(conf, 4)})
+        for i, k in enumerate(ATTRIBUTE_KEYS):
+            s = float(np.clip(scores[i], 0.0, 1.0))
+            # confidence placeholder (later: quality- & calibration-based)
+            conf = 0.6
+            out.append({"key": k, "score": round(s, 4), "confidence": round(conf, 4)})
         return out
 
 model = InferenceModel()
