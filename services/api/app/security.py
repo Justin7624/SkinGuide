@@ -1,11 +1,13 @@
 # services/api/app/security.py
 
 import time
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Request
 from redis import Redis
 from redis.exceptions import RedisError
 
 from .config import settings
+from .admin_auth import get_admin_session_from_request, role_at_least, require_csrf_if_cookie
+from .db import SessionLocal
 
 _redis: Redis | None = None
 
@@ -24,29 +26,37 @@ def _redis_client() -> Redis:
     return _redis
 
 def rate_limit_or_429(session_id: str) -> bool:
-    """
-    Returns True if allowed; False if should be rate-limited.
-    Uses a per-minute fixed window in Redis.
-
-    Key: rl:{session}:{minute_bucket}
-    TTL: 120 seconds
-    """
     bucket = int(time.time() // 60)
     key = f"rl:{session_id}:{bucket}"
-    window_sec = 120  # keep keys slightly longer than 60s to avoid edge thrash
+    window_sec = 120
 
     try:
         r = _redis_client()
         count = int(r.eval(_LUA_INCR_EXPIRE, 1, key, window_sec))
         return count <= int(settings.RATE_LIMIT_PER_MIN)
     except RedisError:
-        # fail open by default for reliability
         return bool(settings.RATE_LIMIT_FAIL_OPEN)
     except Exception:
         return bool(settings.RATE_LIMIT_FAIL_OPEN)
 
-def require_admin(x_admin_key: str | None = Header(default=None)) -> None:
-    if not settings.ADMIN_API_KEY:
-        raise HTTPException(503, "Admin API key not configured")
-    if not x_admin_key or x_admin_key != settings.ADMIN_API_KEY:
-        raise HTTPException(401, "Unauthorized")
+def require_role(required_role: str):
+    """
+    FastAPI dependency factory:
+      - validates admin session (cookie or Bearer)
+      - enforces CSRF for cookie auth on mutating requests
+      - checks RBAC role level
+    """
+    def dep(request: Request):
+        db = SessionLocal()
+        try:
+            adm_sess, user, is_cookie = get_admin_session_from_request(db, request)
+            require_csrf_if_cookie(request, adm_sess, is_cookie)
+            if not role_at_least(user.role, required_role):
+                raise HTTPException(403, "Insufficient role")
+            # attach for handlers if needed
+            request.state.admin_user = user
+            request.state.admin_session = adm_sess
+            return True
+        finally:
+            db.close()
+    return dep
