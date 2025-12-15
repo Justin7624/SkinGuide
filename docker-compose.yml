@@ -16,11 +16,12 @@ services:
   ml:
     build: ./services/ml
     environment:
-      MODEL_VERSION: "0.1.0-mvp"
       TORCH_MODEL_PATH: "/models/current/model.pt"
+      MODEL_VERSION_JSON: "/models/current/current_version.json"
+      MODEL_VERSION: "0.1.0-mvp"
     ports: ["8001:8001"]
     volumes:
-      - modelshare:/models/current
+      - modelshare:/models
 
   api:
     build: ./services/api
@@ -36,9 +37,12 @@ services:
       STORAGE_BACKEND: "local"
 
       SESSION_SECRET: "dev-change-me"
+      REQUIRE_AUTH: "false"          # set true in production
+      ACCESS_TOKEN_TTL_MIN: "43200"  # 30 days
+
       ADMIN_API_KEY: "dev-admin-change-me"
 
-      MODEL_SHARED_DIR: "/models/current"
+      MODEL_SHARED_DIR: "/models"
       MODEL_CURRENT_MANIFEST_PATH: "/models/current/manifest.json"
       MODEL_CURRENT_PT_PATH: "/models/current/model.pt"
 
@@ -49,7 +53,25 @@ services:
     volumes:
       - apiimages:/data/images
       - apidonations:/data/donations
-      - modelshare:/models/current
+      - modelshare:/models
+
+  trainer:
+    build: ./services/trainer
+    environment:
+      TRAIN_DATABASE_URL: "postgresql+psycopg://skinguide:skinguide@postgres:5432/skinguide"
+      API_BASE_URL: "http://api:8000"
+      ADMIN_API_KEY: "dev-admin-change-me"
+      PUBLISH: "true"
+      MODEL_ARTIFACTS_DIR: "/models/artifacts"
+      NEXT_MODEL_VERSION: "0.5.0-auto"
+      EPOCHS: "8"
+      BATCH_SIZE: "16"
+      IMG_SIZE: "128"
+      VAL_SPLIT: "0.2"
+    depends_on: [postgres, api]
+    volumes:
+      - modelshare:/models
+      - apidonations:/data/donations
 
 volumes:
   pgdata:
