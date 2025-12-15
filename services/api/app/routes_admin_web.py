@@ -32,25 +32,15 @@ _HTML = r"""<!doctype html>
     .muted{color:var(--muted)}
     .small{font-size:12px}
     .hide{display:none}
-    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .imgbox{background:#0f1118;border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:10px}
-    .stage{position:relative;overflow:auto;border-radius:12px;border:1px solid rgba(255,255,255,.06);background:#0b0c10}
-    img{display:block;max-width:none}
-    canvas.overlay{position:absolute;left:0;top:0;pointer-events:none}
-    .sliderrow{display:grid;grid-template-columns:260px 1fr 64px;gap:10px;align-items:center;margin-top:8px}
     .rowline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .tabs{display:flex;gap:8px;flex-wrap:wrap}
     .tab{padding:8px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:#0f1118;color:var(--muted);cursor:pointer}
     .tab.active{background:rgba(124,92,255,.18);border-color:rgba(124,92,255,.45);color:var(--ink)}
-    .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--muted)}
-    .badc{color:var(--bad)}
     pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0;max-height:420px;overflow:auto}
-    .drawer{position:fixed;right:16px;top:16px;bottom:16px;width:min(680px, calc(100vw - 32px));background:var(--card);
-      border:1px solid rgba(255,255,255,.12);border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:14px;overflow:auto}
     table{width:100%;border-collapse:collapse}
     th,td{padding:8px;border-bottom:1px solid rgba(255,255,255,.08);font-size:12px}
     th{text-align:left;color:var(--muted);font-weight:800}
-    .chart{width:100%;height:220px;background:#0f1118;border:1px solid rgba(255,255,255,.08);border-radius:12px}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
   </style>
 </head>
 <body>
@@ -84,74 +74,57 @@ _HTML = r"""<!doctype html>
   <div class="row hide" id="dash">
     <div class="card span4"><div class="k">Sessions</div><div class="v" id="sessions">—</div></div>
     <div class="card span4"><div class="k">Analyzes (24h)</div><div class="v" id="an24">—</div></div>
-    <div class="card span4"><div class="k">Active Model</div><div class="v" id="activeModel" style="font-size:18px">—</div></div>
+    <div class="card span4"><div class="k">Stable Model</div><div class="v" id="stableModel" style="font-size:18px">—</div></div>
 
+    <!-- Deployment controls (visible "inside the labeling dashboard" context) -->
     <div class="card span12">
-      <div class="rowline" style="justify-content:space-between">
-        <div class="tabs">
-          <div class="tab active" id="tabMetrics" onclick="setTab('metrics')">Metrics</div>
-          <div class="tab" id="tabModels" onclick="setTab('models')">Models</div>
+      <div class="rowline" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
+        <div>
+          <div class="k">Model Deployment Controls</div>
+          <div class="muted small">Canary rollout (% by session hash) + Promote/Commit + Rollback. Auto-rollback uses bias slice MAE.</div>
         </div>
         <div class="rowline">
           <button onclick="refreshAll()">Refresh</button>
         </div>
       </div>
-    </div>
 
-    <!-- Metrics panel -->
-    <div class="card span12" id="panelMetrics">
-      <div class="rowline" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
-        <div>
-          <div class="k">Metrics</div>
-          <div class="muted small">Labeling metrics + model hot-reload status.</div>
-        </div>
+      <div class="rowline" style="margin-top:10px">
+        <div class="muted small">Canary model:</div>
+        <select id="canarySelect" style="min-width:360px"></select>
+
+        <div class="muted small">Canary %:</div>
+        <input id="canaryPct" type="number" min="0" max="100" value="5" style="width:90px" />
+
+        <button class="good" onclick="startCanary()">Start/Update Canary</button>
+        <button class="primary" onclick="commitCanary()">Commit (Promote to Stable)</button>
+        <button class="bad" onclick="rollbackCanary()">Rollback Canary</button>
+      </div>
+
+      <div class="rowline" style="margin-top:10px;justify-content:space-between;align-items:center;flex-wrap:wrap">
+        <div class="muted small" id="deployNote">—</div>
         <div class="rowline">
-          <select id="mDays">
-            <option value="30" selected>30d</option>
-            <option value="90">90d</option>
-            <option value="180">180d</option>
-            <option value="365">365d</option>
-          </select>
-          <select id="mWindow">
-            <option value="60">weights window 60d</option>
-            <option value="180" selected>weights window 180d</option>
-            <option value="365">weights window 365d</option>
-          </select>
-          <button onclick="loadMetrics()">Load</button>
+          <button onclick="viewHot()">View ML hot-reload state</button>
         </div>
       </div>
 
-      <div class="row" style="margin-top:12px">
-        <div class="card span6">
-          <div class="k">Conflict rate</div>
-          <canvas id="chartConflict" class="chart"></canvas>
-          <div class="muted small" id="confNote" style="margin-top:8px">—</div>
-        </div>
-        <div class="card span6">
-          <div class="k">Escalation rate</div>
-          <canvas id="chartEscal" class="chart"></canvas>
-          <div class="muted small" id="escNote" style="margin-top:8px">—</div>
-        </div>
+      <pre id="deployOut" style="margin-top:10px">—</pre>
+    </div>
 
-        <div class="card span12">
-          <div class="rowline" style="justify-content:space-between;align-items:center">
-            <div>
-              <div class="k">ML Hot-reload</div>
-              <div class="muted small" id="hotNote">—</div>
-            </div>
-            <button onclick="loadHot()">Refresh</button>
-          </div>
-          <pre id="hotOut" style="margin-top:10px">—</pre>
+    <div class="card span12">
+      <div class="rowline" style="justify-content:space-between">
+        <div class="tabs">
+          <div class="tab active" id="tabModels" onclick="setTab('models')">Models</div>
+          <div class="tab" id="tabHot" onclick="setTab('hot')">Hot Reload</div>
         </div>
       </div>
     </div>
 
     <!-- Models panel -->
-    <div class="card span12 hide" id="panelModels">
+    <div class="card span12" id="panelModels">
       <div class="rowline" style="justify-content:space-between;align-items:center;flex-wrap:wrap">
         <div>
-          <div class="k">Models</div>
-          <div class="muted small">List registered model artifacts, view model card, and promote to active.</div>
+          <div class="k">Model Artifacts</div>
+          <div class="muted small">List all artifacts. “Promote” here instantly makes it the stable model and disables canary.</div>
         </div>
         <div class="rowline">
           <button onclick="loadModels()">Reload</button>
@@ -164,7 +137,7 @@ _HTML = r"""<!doctype html>
         <table id="modelsTable">
           <thead>
             <tr>
-              <th>Active</th><th>Version</th><th>Created</th><th>Val loss</th><th>Actions</th>
+              <th>Stable</th><th>Version</th><th>Created</th><th>Val loss</th><th>Actions</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -175,13 +148,20 @@ _HTML = r"""<!doctype html>
       <pre id="modelCard" style="margin-top:8px">Select a model.</pre>
     </div>
 
+    <!-- Hot panel -->
+    <div class="card span12 hide" id="panelHot">
+      <div class="k">ML Hot Reload State</div>
+      <div class="muted small">What the API worker currently has loaded (stable + canary).</div>
+      <pre id="hotOut" style="margin-top:10px">—</pre>
+    </div>
+
   </div>
 </div>
 
 <script>
   let csrf = null;
   let me = null;
-  let tab = "metrics";
+  let tab = "models";
 
   async function api(path, opts={}){
     opts.credentials = "include";
@@ -231,13 +211,20 @@ _HTML = r"""<!doctype html>
     await refreshAll();
   }
 
+  function setTab(next){
+    tab = next;
+    document.getElementById('tabModels').classList.toggle('active', tab==='models');
+    document.getElementById('tabHot').classList.toggle('active', tab==='hot');
+    document.getElementById('panelModels').classList.toggle('hide', tab!=='models');
+    document.getElementById('panelHot').classList.toggle('hide', tab!=='hot');
+    if (tab==='models') loadModels();
+    if (tab==='hot') viewHot();
+  }
+
   async function refreshAll(){
     await loadSummary();
-    if (tab === 'metrics') {
-      await loadHot();
-    } else if (tab === 'models') {
-      await loadModels();
-    }
+    await loadModels();
+    await loadDeployment();
   }
 
   async function loadSummary(){
@@ -245,100 +232,29 @@ _HTML = r"""<!doctype html>
     const j = await r.json();
     document.getElementById('sessions').textContent = j.total_sessions;
     document.getElementById('an24').textContent = j.total_analyzes_24h;
-    document.getElementById('activeModel').textContent = j.active_model_version || '—';
+    document.getElementById('stableModel').textContent = j.active_model_version || '—';
   }
 
-  function setTab(next){
-    tab = next;
-    document.getElementById('tabMetrics').classList.toggle('active', tab==='metrics');
-    document.getElementById('tabModels').classList.toggle('active', tab==='models');
-
-    document.getElementById('panelMetrics').classList.toggle('hide', tab!=='metrics');
-    document.getElementById('panelModels').classList.toggle('hide', tab!=='models');
-
-    if (tab==='metrics') loadHot();
-    if (tab==='models') loadModels();
-  }
-
-  // ----- simple chart helper (same look as before) -----
-  function drawLineChart(canvasId, labels, values, opts={}){
-    const c = document.getElementById(canvasId);
-    const dpr = window.devicePixelRatio || 1;
-    const w = c.clientWidth;
-    const h = c.clientHeight;
-    c.width = Math.floor(w * dpr);
-    c.height = Math.floor(h * dpr);
-    const g = c.getContext('2d');
-    g.scale(dpr,dpr);
-
-    g.clearRect(0,0,w,h);
-    const padL = 40, padR = 10, padT = 10, padB = 24;
-    const iw = w - padL - padR;
-    const ih = h - padT - padB;
-
-    g.strokeStyle = "rgba(255,255,255,0.08)";
-    g.lineWidth = 1;
-    for(let i=0;i<=4;i++){
-      const y = padT + (ih*i/4);
-      g.beginPath(); g.moveTo(padL,y); g.lineTo(w-padR,y); g.stroke();
-    }
-
-    const minY = (opts.minY!=null)?opts.minY:0;
-    const maxY = (opts.maxY!=null)?opts.maxY:1;
-
-    function xAt(i){ return padL + (iw * (labels.length<=1?0:i/(labels.length-1))); }
-    function yAt(v){
-      const t = (v - minY) / (maxY - minY || 1);
-      return padT + ih - (ih * Math.max(0, Math.min(1, t)));
-    }
-
-    g.strokeStyle = opts.color || "rgba(124,92,255,0.95)";
-    g.lineWidth = 2;
-    g.beginPath();
-    for(let i=0;i<values.length;i++){
-      const v = values[i];
-      if (v==null) continue;
-      const x = xAt(i);
-      const y = yAt(v);
-      if (i===0) g.moveTo(x,y); else g.lineTo(x,y);
-    }
-    g.stroke();
-
-    g.fillStyle = "rgba(154,163,178,0.95)";
-    g.font = "12px ui-sans-serif, system-ui";
-    g.textAlign = "left"; g.textBaseline = "top";
-    g.fillText(opts.title || "", 8, 8);
-  }
-
-  // ----- Metrics: conflict/escalation (optional) -----
-  async function loadMetrics(){
-    // If you kept the label-queue stats endpoints, you can re-add those charts here.
-    // This file focuses on model promotion + hot-reload visibility.
-    await loadHot();
-  }
-
-  // ----- Hot reload status -----
-  async function loadHot(){
-    try{
-      const r = await api('/v1/admin/models/active');
-      const j = await r.json();
-      document.getElementById('hotNote').textContent = "Live inference model as seen by API workers (hot reload).";
-      document.getElementById('hotOut').textContent = JSON.stringify(j, null, 2);
-    }catch(e){
-      document.getElementById('hotOut').textContent = String(e);
-    }
-  }
-
-  // ----- Models list + promote + card -----
   async function loadModels(){
     try{
-      const r = await api('/v1/admin/models/list?limit=100');
+      const r = await api('/v1/admin/models/list?limit=200');
       const j = await r.json();
+
+      // populate canary dropdown
+      const sel = document.getElementById('canarySelect');
+      sel.innerHTML = '';
+      (j.items||[]).forEach(row=>{
+        const opt = document.createElement('option');
+        opt.value = row.id;
+        opt.textContent = `${row.version}${row.is_active ? ' (stable)' : ''}`;
+        sel.appendChild(opt);
+      });
+
       const tb = document.querySelector('#modelsTable tbody');
       tb.innerHTML = '';
 
       document.getElementById('modelsNote').textContent =
-        `Active: ${j.active_version || '—'} · total: ${(j.items||[]).length} · role: ${(me && me.role) || '—'}`;
+        `Stable: ${j.active_version || '—'} · total artifacts: ${(j.items||[]).length} · role: ${(me && me.role) || '—'}`;
 
       (j.items||[]).forEach(row=>{
         const tr = document.createElement('tr');
@@ -352,13 +268,12 @@ _HTML = r"""<!doctype html>
           <td>${valLoss==null ? '—' : Number(valLoss).toFixed(6)}</td>
           <td>
             <button onclick="viewCard(${row.id})">View card</button>
-            ${canPromote ? `<button class="primary" onclick="promote(${row.id})">Promote</button>` : ''}
+            ${canPromote ? `<button class="primary" onclick="promoteStable(${row.id})">Promote Stable</button>` : ''}
           </td>
         `;
         tb.appendChild(tr);
       });
 
-      // auto-load top card
       if ((j.items||[]).length){
         viewCard(j.items[0].id);
       } else {
@@ -379,18 +294,119 @@ _HTML = r"""<!doctype html>
     }
   }
 
-  async function promote(id){
+  async function promoteStable(id){
     try{
       await api(`/v1/admin/models/${id}/promote`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({reason:"admin_ui_promote"})
+        body: JSON.stringify({reason:"admin_ui_promote_stable"})
       });
-      await loadSummary();
-      await loadModels();
-      await loadHot();
+      await refreshAll();
     }catch(e){
       alert(String(e));
+    }
+  }
+
+  async function loadDeployment(){
+    try{
+      const r = await api('/v1/admin/models/deployment');
+      const j = await r.json();
+      document.getElementById('deployOut').textContent = JSON.stringify(j, null, 2);
+
+      const dep = (j.deployment || {});
+      const stable = (j.stable || {});
+      const canary = (j.canary || {});
+
+      let note = `Stable=${stable.version || '—'} · Canary=${canary.version || '—'} · Enabled=${dep.enabled} · %=${dep.canary_percent}`;
+      if (dep.last_check && dep.last_check.ok === false) note += " · ⚠️ last_check failed";
+      document.getElementById('deployNote').textContent = note;
+
+      // try set dropdown to current canary
+      if (dep.canary_model_id){
+        document.getElementById('canarySelect').value = String(dep.canary_model_id);
+      }
+      if (dep.canary_percent != null){
+        document.getElementById('canaryPct').value = String(dep.canary_percent);
+      }
+    }catch(e){
+      document.getElementById('deployNote').textContent = String(e);
+    }
+  }
+
+  async function startCanary(){
+    if (!me || me.role !== 'admin'){
+      alert('Admin role required.');
+      return;
+    }
+    try{
+      const canaryId = Number(document.getElementById('canarySelect').value);
+      const pct = Number(document.getElementById('canaryPct').value);
+      const r = await api('/v1/admin/models/deployment/set_canary', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          canary_model_id: canaryId,
+          canary_percent: pct,
+          enabled: true,
+          auto_rollback_enabled: true,
+          max_slice_mae_increase: 0.03,
+          min_slice_n: 50,
+          reason: "admin_ui_set_canary"
+        })
+      });
+      const j = await r.json();
+      await refreshAll();
+      if (j.rolled_back) alert('Auto-rollback triggered due to bias slice MAE degradation. Canary disabled.');
+    }catch(e){
+      alert(String(e));
+    }
+  }
+
+  async function commitCanary(){
+    if (!me || me.role !== 'admin'){
+      alert('Admin role required.');
+      return;
+    }
+    try{
+      const r = await api('/v1/admin/models/deployment/commit', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({reason:"admin_ui_commit_canary"})
+      });
+      const j = await r.json();
+      await refreshAll();
+      if (j.rolled_back) alert('Commit blocked: auto-rollback guardrail triggered.');
+    }catch(e){
+      alert(String(e));
+    }
+  }
+
+  async function rollbackCanary(){
+    if (!me || me.role !== 'admin'){
+      alert('Admin role required.');
+      return;
+    }
+    try{
+      await api('/v1/admin/models/deployment/rollback', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({reason:"admin_ui_rollback"})
+      });
+      await refreshAll();
+    }catch(e){
+      alert(String(e));
+    }
+  }
+
+  async function viewHot(){
+    try{
+      const r = await api('/v1/admin/models/active');
+      const j = await r.json();
+      document.getElementById('hotOut').textContent = JSON.stringify(j, null, 2);
+      setTab('hot');
+    }catch(e){
+      document.getElementById('hotOut').textContent = String(e);
+      setTab('hot');
     }
   }
 
