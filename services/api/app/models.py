@@ -10,7 +10,6 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    # NEW: bind session to device without storing raw device token
     device_token_hash: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     consent: Mapped["Consent"] = relationship(back_populates="session", uselist=False)
@@ -54,6 +53,10 @@ class DonatedSample(Base):
 
     labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     labeled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # NEW: withdrawal (user deletion) support
+    is_withdrawn: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="donations")
 
