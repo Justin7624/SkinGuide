@@ -87,6 +87,7 @@ def fetch_labeled_rows(db_url: str) -> List[Dict]:
         SELECT roi_sha256, roi_image_path, labels_json
         FROM donated_samples
         WHERE labels_json IS NOT NULL
+          AND is_withdrawn = false
     """)
     out = []
     with engine.connect() as conn:
@@ -121,9 +122,15 @@ def build_dataset(rows: List[Dict]) -> List[Dict]:
         if not any_label:
             continue
 
+        img_uri = str(r["roi_image_path"])
+        if img_uri.startswith("file://"):
+            img_path = Path(img_uri.replace("file://", ""))
+        else:
+            img_path = Path(img_uri)
+
         items.append({
             "roi_sha256": r["roi_sha256"],
-            "path": Path(r["roi_image_path"].replace("file://", "")) if str(r["roi_image_path"]).startswith("file://") else Path(r["roi_image_path"]),
+            "path": img_path,
             "y": y,
             "m": m,
             "fitzpatrick": fitz if fitz in FITZ else None,
@@ -184,7 +191,6 @@ def eval_model(model: nn.Module, items: List[Dict], idxs: List[int], device, img
             X, Y, M, meta = make_batch(items, b, img_size)
             X, Y, M = X.to(device), Y.to(device), M.to(device)
             pred = torch.sigmoid(model(X))
-            # per example loss
             diff = ((pred - Y) ** 2) * M
             denom = M.sum(dim=1).clamp_min(1e-6)
             per_ex = (diff.sum(dim=1) / denom).detach().cpu().numpy()
@@ -198,7 +204,6 @@ def eval_model(model: nn.Module, items: List[Dict], idxs: List[int], device, img
     return float(np.mean(losses)) if losses else 1e9, cache
 
 async def publish_to_api(api_base: str, admin_key: str, version: str, model_path: Path, manifest_path: Path):
-    # register
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(
             f"{api_base}/v1/model/register",
@@ -213,7 +218,6 @@ async def publish_to_api(api_base: str, admin_key: str, version: str, model_path
         if r.status_code >= 400:
             raise RuntimeError(f"register failed: {r.status_code} {r.text}")
 
-        # activate
         r2 = await client.post(
             f"{api_base}/v1/model/activate",
             headers={"X-Admin-Key": admin_key},
@@ -238,7 +242,7 @@ def main():
     val_split = env_float("VAL_SPLIT", 0.2)
     seed = env_int("SEED", 123)
 
-    version = os.getenv("NEXT_MODEL_VERSION", f"0.5.{int(time.time())}")
+    version = os.getenv("NEXT_MODEL_VERSION", f"0.6.{int(time.time())}")
 
     rows = fetch_labeled_rows(db_url)
     items = build_dataset(rows)
@@ -302,7 +306,7 @@ def main():
         val_samples=len(val_idx),
         metrics={"val_masked_mse": float(final_val)},
         bias_slices={"fitzpatrick": fitz_s, "age_band": age_s},
-        notes="DB-driven labels. Baseline model. Do not claim diagnosis.",
+        notes="DB-driven labels. Withdrawn donations excluded.",
     )
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.__dict__, indent=2), encoding="utf-8")
