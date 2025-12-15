@@ -26,11 +26,16 @@ services:
       DATABASE_URL: "postgresql+psycopg://skinguide:skinguide@postgres:5432/skinguide"
       REDIS_URL: "redis://redis:6379/0"
       ML_URL: "http://ml:8001/infer"
-      # Default privacy stance: do NOT store images
+
+      # Progress storage (ROI-only). Default is no storage unless user opts in.
       STORE_IMAGES_DEFAULT: "false"
-      # Optional demo: if true AND user opted-in, store ROI image on disk
       STORE_IMAGES_ENABLED: "true"
       IMAGE_STORE_DIR: "/data/images"
+
+      # Donation storage (ROI-only). Default OFF unless user opts in.
+      DONATION_STORAGE_ENABLED: "true"
+      DONATION_STORE_DIR: "/data/donations"
+
       SESSION_SECRET: "dev-change-me"
       RATE_LIMIT_PER_MIN: "20"
       MAX_IMAGE_MB: "6"
@@ -38,7 +43,9 @@ services:
     depends_on: [postgres, redis, ml]
     volumes:
       - apiimages:/data/images
+      - apidonations:/data/donations
 
 volumes:
   pgdata:
   apiimages:
+  apidonations:
