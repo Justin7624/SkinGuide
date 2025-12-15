@@ -83,11 +83,39 @@ class ModelArtifact(Base):
     model_uri: Mapped[str] = mapped_column(String)
     manifest_uri: Mapped[str] = mapped_column(String)
 
-    # NEW: separate markdown model card location (local path or s3://...)
     model_card_uri: Mapped[str | None] = mapped_column(String, nullable=True)
 
     metrics_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ModelDeployment(Base):
+    """
+    Single-row deployment config that enables staged rollout (canary % by session hash).
+    Stable model is always the currently active ModelArtifact (is_active=True).
+    Canary model can be any ModelArtifact (usually the newest candidate).
+    """
+    __tablename__ = "model_deployments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    # candidate model to roll out
+    canary_model_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("model_artifacts.id"), nullable=True, index=True)
+    canary_percent: Mapped[int] = mapped_column(Integer, default=0)  # 0..100
+
+    # auto rollback guardrails
+    auto_rollback_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_slice_mae_increase: Mapped[float] = mapped_column(Float, default=0.03)
+    min_slice_n: Mapped[int] = mapped_column(Integer, default=50)
+
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_check_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    canary_model: Mapped["ModelArtifact"] = relationship("ModelArtifact")
 
 
 class PolicyDocument(Base):
