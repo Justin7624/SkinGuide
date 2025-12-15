@@ -20,7 +20,7 @@ from .routes_label import router as label_router
 from .routes_model import router as model_router
 from .routes_me import router as me_router
 
-app = FastAPI(title="SkinGuide API", version="0.9.0")
+app = FastAPI(title="SkinGuide API", version="1.0.0")
 
 configure_logging()
 app.add_middleware(RequestLoggingMiddleware)
