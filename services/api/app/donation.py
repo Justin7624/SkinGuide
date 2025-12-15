@@ -18,7 +18,13 @@ def store_roi_donation(
 ) -> tuple[bool, str]:
     """
     Stores ROI-only donation if enabled. Dedupes by roi_sha256.
-    Returns (stored, reason).
+
+    Returns (stored, reason):
+      - (False, donation_storage_disabled)
+      - (False, missing_roi)
+      - (True, stored)
+      - (True, already_donated)           (exists and belongs to same session)
+      - (False, duplicate_other_session)  (exists but belongs to different session)
     """
     if not settings.DONATION_STORAGE_ENABLED:
         return (False, "donation_storage_disabled")
@@ -28,7 +34,9 @@ def store_roi_donation(
 
     existing = db.query(models.DonatedSample).filter(models.DonatedSample.roi_sha256 == roi_sha256).first()
     if existing:
-        return (False, "duplicate")
+        if existing.session_id == session_id:
+            return (True, "already_donated")
+        return (False, "duplicate_other_session")
 
     shard = roi_sha256[:2]
     dirpath = os.path.join(settings.DONATION_STORE_DIR, shard)
@@ -72,18 +80,15 @@ def store_labels_for_sample(
     if not sample:
         return (False, "sample_not_found")
 
-    # Optional: ensure the session submitting labels matches the donating session
-    # (you can relax this later if you add accounts/admin tooling)
+    # Without accounts, keep ownership strict: only the donating session can label its sample.
     if sample.session_id != session_id:
         return (False, "not_owner")
 
-    # Persist in DB
     from datetime import datetime
     sample.labels_json = json.dumps(labels_payload, ensure_ascii=False)
     sample.labeled_at = datetime.utcnow()
     db.commit()
 
-    # Persist on disk for trainer
     _safe_mkdir(settings.DONATION_LABEL_DIR)
     label_path = os.path.join(settings.DONATION_LABEL_DIR, f"{roi_sha256}.json")
     with open(label_path, "w", encoding="utf-8") as f:
