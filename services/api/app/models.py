@@ -112,7 +112,7 @@ class AuditEvent(Base):
 
 
 # --------------------------
-# Admin RBAC + server sessions
+# Admin RBAC + server sessions + 2FA + reset
 # --------------------------
 
 class AdminUser(Base):
@@ -129,15 +129,19 @@ class AdminUser(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # 2FA (TOTP)
+    totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)   # base32
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    recovery_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # hashed codes list
+
     sessions: Mapped[list["AdminSession"]] = relationship(back_populates="user")
+    resets: Mapped[list["AdminPasswordReset"]] = relationship(back_populates="user")
 
 
 class AdminSession(Base):
     __tablename__ = "admin_sessions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-
-    # opaque token presented by cookie or Bearer
     token: Mapped[str] = mapped_column(String, unique=True, index=True)
 
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_users.id"), index=True)
@@ -146,10 +150,27 @@ class AdminSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    # CSRF token for cookie-based web requests
     csrf_token: Mapped[str] = mapped_column(String, index=True)
 
     ip: Mapped[str | None] = mapped_column(String, nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
 
     user: Mapped["AdminUser"] = relationship(back_populates="sessions")
+
+
+class AdminPasswordReset(Base):
+    __tablename__ = "admin_password_resets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_users.id"), index=True)
+
+    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    user: Mapped["AdminUser"] = relationship(back_populates="resets")
