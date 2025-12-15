@@ -21,23 +21,18 @@ class Settings(BaseSettings):
     IMAGE_STORE_DIR: str = "/data/images"
     DONATION_STORE_DIR: str = "/data/donations"
 
-    # Legacy admin key (disable by leaving unset)
     ADMIN_API_KEY: str | None = None
 
-    # RBAC bootstrap: allow creating the FIRST admin user if none exists.
-    # Send as header: X-Bootstrap-Token
     ADMIN_BOOTSTRAP_TOKEN: str | None = None
 
-    # Admin web sessions (server-side)
-    ADMIN_SESSION_TTL_MIN: int = 60 * 12  # 12 hours
+    ADMIN_SESSION_TTL_MIN: int = 60 * 12
     ADMIN_COOKIE_NAME: str = "admin_session"
-    ADMIN_COOKIE_SECURE: bool = False     # set True behind HTTPS in production
-    ADMIN_COOKIE_SAMESITE: str = "lax"    # "lax" recommended
+    ADMIN_COOKIE_SECURE: bool = False
+    ADMIN_COOKIE_SAMESITE: str = "lax"
     ADMIN_COOKIE_DOMAIN: str | None = None
 
-    # Password reset (email sending is out of scope; we scaffold token issuance)
     PASSWORD_RESET_TTL_MIN: int = 30
-    PASSWORD_RESET_DEBUG_RETURN_TOKEN: bool = True  # set False in production
+    PASSWORD_RESET_DEBUG_RETURN_TOKEN: bool = True
 
     MODEL_SHARED_DIR: str = "/models"
     MODEL_CURRENT_MANIFEST_PATH: str = "/models/current/manifest.json"
@@ -45,7 +40,7 @@ class Settings(BaseSettings):
 
     SESSION_SECRET: str
     REQUIRE_AUTH: bool = False
-    ACCESS_TOKEN_TTL_MIN: int = 60 * 24 * 30  # 30 days
+    ACCESS_TOKEN_TTL_MIN: int = 60 * 24 * 30
 
     RATE_LIMIT_PER_MIN: int = 20
     RATE_LIMIT_FAIL_OPEN: bool = True
@@ -59,13 +54,19 @@ class Settings(BaseSettings):
     WITHDRAWN_DONATION_RETENTION_DAYS: int | None = None
 
     # -------------------------
-    # Labeling consensus tuning
+    # Consensus configuration
     # -------------------------
-    LABEL_CONSENSUS_N: int = 2  # set to 3 for 3-labeler consensus
+    LABEL_CONSENSUS_N: int = 2  # base consensus for "normal" items
+    CONFLICT_ESCALATE_ENABLED: bool = True
+    CONFLICT_ESCALATE_TO_N: int = 3  # auto-escalate disagreements to 3rd labeler
+
     LABEL_MEAN_ABS_DIFF_MAX: float = 0.35
     LABEL_MAX_ABS_DIFF_MAX: float = 0.60
 
-    # IRR stats compute cap
+    # when using N>=3, you can optionally relax slightly
+    LABEL_MEAN_ABS_DIFF_MAX_N3: float = 0.40
+    LABEL_MAX_ABS_DIFF_MAX_N3: float = 0.65
+
     IRR_MAX_SAMPLES: int = 5000
 
 settings = Settings()
