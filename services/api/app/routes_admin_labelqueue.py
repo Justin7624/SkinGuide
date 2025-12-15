@@ -228,16 +228,6 @@ def _write_consensus_artifact(
 # --------------------------
 
 def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
-    """
-    Returns a structured state dict:
-      - mode: "skip" | "label"
-      - conflict: bool (true => conflicts queue / admin review)
-      - escalate: bool (true => needs 3rd labeler)
-      - need_n: int
-      - have_non_skip: int distinct
-      - have_skip: int distinct
-      - reason / meta
-    """
     subs = (
         db.query(models.DonatedSampleLabel)
         .filter(models.DonatedSampleLabel.donated_sample_id == donation_id)
@@ -253,7 +243,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
     have_non_skip = len(non_skip_distinct)
     have_skip = len(skip_distinct)
 
-    # Mixed skip/label is a true conflict for review
     if have_non_skip > 0 and have_skip > 0:
         return {
             "mode": "mixed",
@@ -265,7 +254,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
             "reason": "mixed_skip_and_label",
         }
 
-    # Pure skip path
     if have_skip >= base_n and have_non_skip == 0:
         return {
             "mode": "skip",
@@ -277,7 +265,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
             "ready": True,
         }
 
-    # Not enough non-skip yet
     if have_non_skip < base_n:
         return {
             "mode": "label",
@@ -290,12 +277,10 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
             "reason": "need_more_labels",
         }
 
-    # Evaluate base consensus using latest base_n distinct
     picked = _distinct_latest_submissions(subs, n=base_n, non_skip=True)
     g, r, meta = _consensus_from_n(picked)
 
     if meta.get("n_compared", 0) == 0:
-        # no overlap keys is conflict; escalation might help
         if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip < esc_n:
             return {
                 "mode": "label",
@@ -320,7 +305,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
 
     mean_max, abs_max = _thresholds_for_n(base_n)
     if float(meta.get("mean_abs_diff", 0.0)) > mean_max or float(meta.get("max_abs_diff", 0.0)) > abs_max:
-        # Disagreement conflict: auto-escalate to third labeler when enabled (and not enough yet)
         if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip < esc_n:
             return {
                 "mode": "label",
@@ -334,7 +318,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
                 "preview": {"labels": g, "region_labels": r},
             }
 
-        # If already have >= esc_n, try N=esc_n finalize instead of conflict (median-of-3)
         if settings.CONFLICT_ESCALATE_ENABLED and have_non_skip >= esc_n:
             picked3 = _distinct_latest_submissions(subs, n=esc_n, non_skip=True)
             g3, r3, meta3 = _consensus_from_n(picked3)
@@ -365,7 +348,6 @@ def _consensus_state(db: OrmSession, donation_id: int) -> Dict[str, Any]:
             "preview": {"labels": g, "region_labels": r},
         }
 
-    # Base consensus OK
     return {
         "mode": "label",
         "conflict": False,
@@ -385,7 +367,6 @@ def _finalize_if_ready(db: OrmSession, donation: models.DonatedSample, request: 
 
     state = _consensus_state(db, donation.id)
 
-    # Persist an artifact for every finalize attempt decision
     _write_consensus_artifact(
         db,
         donated_sample_id=donation.id,
@@ -406,7 +387,6 @@ def _finalize_if_ready(db: OrmSession, donation: models.DonatedSample, request: 
         .all()
     )
 
-    # skip consensus
     if state.get("mode") == "skip":
         need_n = int(state.get("need_n", 2))
         picked = _distinct_latest_submissions(subs, n=need_n, non_skip=False)
@@ -435,7 +415,6 @@ def _finalize_if_ready(db: OrmSession, donation: models.DonatedSample, request: 
         )
         return {"finalized": True, "reason": "consensus_skip", "used_n": need_n}
 
-    # label consensus
     used_n = int(state.get("used_n") or state.get("need_n") or max(2, int(settings.LABEL_CONSENSUS_N)))
     picked = _distinct_latest_submissions(subs, n=used_n, non_skip=True)
     g, r, meta = _consensus_from_n(picked)
@@ -511,35 +490,47 @@ class LabelReq(BaseModel):
 class SkipReq(BaseModel):
     reason: str = "unclear"
 
-class SubmissionRow(BaseModel):
-    id: int
-    created_at: str
-    admin_user_id: int
-    admin_email: str | None = None
-    is_skip: bool
-    labels_json: str
-
-class SubmissionsResp(BaseModel):
-    donated_sample_id: int
-    final_labels_json: str | None = None
-    finalized_at: str | None = None
-    submissions: list[SubmissionRow] = Field(default_factory=list)
-
 class ForceFinalizeReq(BaseModel):
     final: dict = Field(default_factory=dict)
 
-class LabelerStat(BaseModel):
+class ConflictRatesPoint(BaseModel):
+    date: str
+    total: int
+    finalized: int
+    skipped_final: int
+    conflict: int
+    escalated: int
+    needs_more: int
+    conflict_rate: float
+    escalated_rate: float
+
+class ConflictRatesResp(BaseModel):
+    days: int
+    points: list[ConflictRatesPoint] = Field(default_factory=list)
+
+class LabelerSnapshotRow(BaseModel):
     admin_user_id: int
     admin_email: str | None = None
+    created_at: str
+    window_days: int
     n_samples: int
     mean_abs_error: float | None = None
     reliability: float | None = None
     weight: float | None = None
 
-class LabelerStatsResp(BaseModel):
+class LabelerLatestResp(BaseModel):
+    window_days: int
+    items: list[LabelerSnapshotRow] = Field(default_factory=list)
+
+class LabelerSeries(BaseModel):
+    admin_user_id: int
+    admin_email: str | None = None
+    points: list[dict] = Field(default_factory=list)  # {date, weight, n_samples}
+
+class LabelerTimeseriesResp(BaseModel):
     days: int
-    min_samples: int
-    items: list[LabelerStat] = Field(default_factory=list)
+    window_days: int
+    series: list[LabelerSeries] = Field(default_factory=list)
 
 # --------------------------
 # Queue endpoints
@@ -547,9 +538,6 @@ class LabelerStatsResp(BaseModel):
 
 @router.get("/next", response_model=QueueResp, dependencies=[read_dep])
 def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Request = None):
-    """
-    Normal queue excludes true conflicts, but includes 'escalate' items (needs 3rd labeler).
-    """
     limit = max(1, min(int(limit), 100))
     admin_user = getattr(request.state, "admin_user", None)
     my_id = int(admin_user.id) if admin_user and int(getattr(admin_user, "id", 0)) > 0 else None
@@ -570,7 +558,7 @@ def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Reque
     for d in rows:
         state = _consensus_state(db, d.id)
         if state.get("conflict"):
-            continue  # true conflicts go to /conflicts
+            continue
 
         already_by_me = False
         if my_id is not None:
@@ -619,9 +607,6 @@ def next_items(limit: int = 20, db: OrmSession = Depends(get_db), request: Reque
 
 @router.get("/conflicts", response_model=QueueResp, dependencies=[read_dep])
 def conflict_items(limit: int = 50, db: OrmSession = Depends(get_db), request: Request = None):
-    """
-    True conflicts: mixed skip/label OR disagreement after escalation threshold met (or escalation disabled).
-    """
     limit = max(1, min(int(limit), 200))
 
     storage = get_storage()
@@ -698,42 +683,6 @@ def stream_roi(donation_id: int, db: OrmSession = Depends(get_db)):
         raise HTTPException(400, "ROI not local; use presigned URL")
 
     return FileResponse(lp, media_type="image/jpeg")
-
-@router.get("/{donation_id}/submissions", response_model=SubmissionsResp, dependencies=[read_dep])
-def submissions(donation_id: int, db: OrmSession = Depends(get_db)):
-    d = db.get(models.DonatedSample, int(donation_id))
-    if not d or d.is_withdrawn:
-        raise HTTPException(404, "Not found")
-
-    subs = (
-        db.query(models.DonatedSampleLabel)
-        .filter(models.DonatedSampleLabel.donated_sample_id == d.id)
-        .order_by(desc(models.DonatedSampleLabel.created_at))
-        .all()
-    )
-
-    admin_ids = list({s.admin_user_id for s in subs})
-    admins = {}
-    if admin_ids:
-        for u in db.query(models.AdminUser).filter(models.AdminUser.id.in_(admin_ids)).all():
-            admins[u.id] = u.email
-
-    return SubmissionsResp(
-        donated_sample_id=d.id,
-        final_labels_json=d.labels_json,
-        finalized_at=d.labeled_at.isoformat() if d.labeled_at else None,
-        submissions=[
-            SubmissionRow(
-                id=s.id,
-                created_at=s.created_at.isoformat(),
-                admin_user_id=s.admin_user_id,
-                admin_email=admins.get(s.admin_user_id),
-                is_skip=bool(s.is_skip),
-                labels_json=s.labels_json,
-            )
-            for s in subs
-        ],
-    )
 
 # --------------------------
 # Label submit + skip + force finalize
@@ -899,128 +848,158 @@ def force_finalize(donation_id: int, payload: ForceFinalizeReq, request: Request
     return {"ok": True}
 
 # --------------------------
-# Labeler reliability stats (for trainer weighting)
+# Metrics endpoints
 # --------------------------
 
-def _flatten_labels(j: Dict[str, Any]) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    labels = j.get("labels") if isinstance(j.get("labels"), dict) else {}
-    for k, v in labels.items():
-        fv = _float01(v)
-        if fv is not None:
-            out[f"g:{k}"] = fv
-
-    regions = j.get("region_labels") if isinstance(j.get("region_labels"), dict) else {}
-    for region, d in regions.items():
-        if not isinstance(d, dict):
-            continue
-        for k, v in d.items():
-            fv = _float01(v)
-            if fv is not None:
-                out[f"r:{region}:{k}"] = fv
-    return out
-
-def _mae_between(a: Dict[str, float], b: Dict[str, float]) -> Optional[float]:
-    keys = set(a.keys()) & set(b.keys())
-    if not keys:
-        return None
-    return sum(abs(a[k] - b[k]) for k in keys) / float(len(keys))
-
-def _weight_from_mae(mae: float) -> float:
-    # reliability: 1 - MAE; weight range [0.2, 1.0]
-    rel = max(0.0, min(1.0, 1.0 - float(mae)))
-    return 0.2 + 0.8 * rel
-
-@router.get("/stats/labelers", response_model=LabelerStatsResp, dependencies=[read_dep])
-def labeler_stats(
-    days: int = Query(default=180, ge=7, le=3650),
-    min_samples: int = Query(default=10, ge=1, le=5000),
-    db: OrmSession = Depends(get_db),
-):
-    """
-    Computes per-labeler MAE against finalized consensus for samples they participated in.
-    Trainer can use this endpoint OR replicate logic in-service.
-    """
+@router.get("/stats/conflict-rates", response_model=ConflictRatesResp, dependencies=[read_dep])
+def conflict_rates(days: int = Query(default=90, ge=7, le=3650), db: OrmSession = Depends(get_db)):
     cutoff = datetime.utcnow() - timedelta(days=int(days))
 
-    # Finalized samples in window
-    donations = (
-        db.query(models.DonatedSample)
-        .filter(models.DonatedSample.is_withdrawn == False)  # noqa: E712
-        .filter(models.DonatedSample.labels_json.isnot(None))
-        .filter(models.DonatedSample.labeled_at.isnot(None))
-        .filter(models.DonatedSample.labeled_at >= cutoff)
-        .order_by(desc(models.DonatedSample.labeled_at))
-        .limit(20000)
+    # date() works on SQLite; on Postgres it yields date too.
+    day = func.date(models.ConsensusArtifact.created_at)
+
+    rows = (
+        db.query(
+            day.label("day"),
+            func.count(models.ConsensusArtifact.id).label("total"),
+            func.sum(func.case((models.ConsensusArtifact.status == "finalized", 1), else_=0)).label("finalized"),
+            func.sum(func.case((models.ConsensusArtifact.status == "skipped_final", 1), else_=0)).label("skipped_final"),
+            func.sum(func.case((models.ConsensusArtifact.status == "conflict", 1), else_=0)).label("conflict"),
+            func.sum(func.case((models.ConsensusArtifact.status == "escalated", 1), else_=0)).label("escalated"),
+            func.sum(func.case((models.ConsensusArtifact.status == "needs_more", 1), else_=0)).label("needs_more"),
+        )
+        .filter(models.ConsensusArtifact.created_at >= cutoff)
+        .group_by(day)
+        .order_by(day.asc())
         .all()
     )
 
-    # Accumulate per admin
-    sums: Dict[int, float] = {}
-    counts: Dict[int, int] = {}
-    emails: Dict[int, str] = {}
-
-    # cache admin emails
-    for u in db.query(models.AdminUser).all():
-        emails[u.id] = u.email
-
-    for d in donations:
-        try:
-            final = json.loads(d.labels_json or "{}")
-        except Exception:
-            continue
-        final_flat = _flatten_labels(final)
-        cons = final.get("consensus") if isinstance(final.get("consensus"), dict) else {}
-        frm = cons.get("from") if isinstance(cons.get("from"), list) else []
-        admin_ids = []
-        for item in frm:
-            if isinstance(item, dict) and "admin_user_id" in item:
-                try:
-                    admin_ids.append(int(item["admin_user_id"]))
-                except Exception:
-                    pass
-        admin_ids = list({x for x in admin_ids if x > 0})
-        if not admin_ids:
-            continue
-
-        # Compare each admin's submission to final
-        for aid in admin_ids:
-            sub = (
-                db.query(models.DonatedSampleLabel)
-                .filter(models.DonatedSampleLabel.donated_sample_id == d.id)
-                .filter(models.DonatedSampleLabel.admin_user_id == aid)
-                .filter(models.DonatedSampleLabel.is_skip == False)  # noqa: E712
-                .order_by(desc(models.DonatedSampleLabel.created_at))
-                .first()
-            )
-            if not sub:
-                continue
-            try:
-                sj = json.loads(sub.labels_json or "{}")
-            except Exception:
-                continue
-            sub_flat = _flatten_labels(sj)
-            m = _mae_between(final_flat, sub_flat)
-            if m is None:
-                continue
-            sums[aid] = sums.get(aid, 0.0) + float(m)
-            counts[aid] = counts.get(aid, 0) + 1
-
-    items: list[LabelerStat] = []
-    for aid, n in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
-        if n < int(min_samples):
-            continue
-        mae = sums.get(aid, 0.0) / float(n)
-        rel = max(0.0, min(1.0, 1.0 - mae))
-        items.append(
-            LabelerStat(
-                admin_user_id=aid,
-                admin_email=emails.get(aid),
-                n_samples=int(n),
-                mean_abs_error=float(round(mae, 4)),
-                reliability=float(round(rel, 4)),
-                weight=float(round(_weight_from_mae(mae), 4)),
+    points: list[ConflictRatesPoint] = []
+    for r in rows:
+        total = int(r.total or 0)
+        conflict = int(r.conflict or 0)
+        escalated = int(r.escalated or 0)
+        points.append(
+            ConflictRatesPoint(
+                date=str(r.day),
+                total=total,
+                finalized=int(r.finalized or 0),
+                skipped_final=int(r.skipped_final or 0),
+                conflict=conflict,
+                escalated=escalated,
+                needs_more=int(r.needs_more or 0),
+                conflict_rate=(float(conflict) / float(total)) if total else 0.0,
+                escalated_rate=(float(escalated) / float(total)) if total else 0.0,
             )
         )
 
-    return LabelerStatsResp(days=int(days), min_samples=int(min_samples), items=items)
+    return ConflictRatesResp(days=int(days), points=points)
+
+@router.get("/stats/labelers/latest", response_model=LabelerLatestResp, dependencies=[read_dep])
+def labeler_latest(window_days: int = Query(default=180, ge=7, le=3650), top: int = Query(default=50, ge=1, le=500), db: OrmSession = Depends(get_db)):
+    # latest snapshot per labeler within same window_days
+    subq = (
+        db.query(
+            models.LabelerReliabilitySnapshot.admin_user_id.label("aid"),
+            func.max(models.LabelerReliabilitySnapshot.created_at).label("mx"),
+        )
+        .filter(models.LabelerReliabilitySnapshot.window_days == int(window_days))
+        .group_by(models.LabelerReliabilitySnapshot.admin_user_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(models.LabelerReliabilitySnapshot)
+        .join(subq, (models.LabelerReliabilitySnapshot.admin_user_id == subq.c.aid) & (models.LabelerReliabilitySnapshot.created_at == subq.c.mx))
+        .order_by(models.LabelerReliabilitySnapshot.weight.desc().nullslast(), models.LabelerReliabilitySnapshot.n_samples.desc())
+        .limit(int(top))
+        .all()
+    )
+
+    items = [
+        LabelerSnapshotRow(
+            admin_user_id=int(r.admin_user_id),
+            admin_email=r.admin_email,
+            created_at=r.created_at.isoformat(),
+            window_days=int(r.window_days),
+            n_samples=int(r.n_samples),
+            mean_abs_error=float(r.mean_abs_error) if r.mean_abs_error is not None else None,
+            reliability=float(r.reliability) if r.reliability is not None else None,
+            weight=float(r.weight) if r.weight is not None else None,
+        )
+        for r in rows
+    ]
+    return LabelerLatestResp(window_days=int(window_days), items=items)
+
+@router.get("/stats/labelers/timeseries", response_model=LabelerTimeseriesResp, dependencies=[read_dep])
+def labeler_timeseries(
+    days: int = Query(default=90, ge=7, le=3650),
+    window_days: int = Query(default=180, ge=7, le=3650),
+    top: int = Query(default=10, ge=1, le=50),
+    db: OrmSession = Depends(get_db),
+):
+    cutoff = datetime.utcnow() - timedelta(days=int(days))
+
+    # pick top labelers by latest n_samples
+    latest = labeler_latest(window_days=window_days, top=top, db=db)
+    top_ids = [x.admin_user_id for x in latest.items]
+
+    if not top_ids:
+        return LabelerTimeseriesResp(days=int(days), window_days=int(window_days), series=[])
+
+    day = func.date(models.LabelerReliabilitySnapshot.created_at)
+
+    rows = (
+        db.query(
+            models.LabelerReliabilitySnapshot.admin_user_id,
+            models.LabelerReliabilitySnapshot.admin_email,
+            day.label("day"),
+            func.max(models.LabelerReliabilitySnapshot.created_at).label("mx"),
+        )
+        .filter(models.LabelerReliabilitySnapshot.window_days == int(window_days))
+        .filter(models.LabelerReliabilitySnapshot.created_at >= cutoff)
+        .filter(models.LabelerReliabilitySnapshot.admin_user_id.in_(top_ids))
+        .group_by(models.LabelerReliabilitySnapshot.admin_user_id, models.LabelerReliabilitySnapshot.admin_email, day)
+        .order_by(day.asc())
+        .all()
+    )
+
+    # fetch the actual snapshot rows for those (aid, mx)
+    idx = {(int(r.admin_user_id), r.mx) for r in rows}
+    snaps = (
+        db.query(models.LabelerReliabilitySnapshot)
+        .filter(models.LabelerReliabilitySnapshot.window_days == int(window_days))
+        .filter(models.LabelerReliabilitySnapshot.admin_user_id.in_(top_ids))
+        .filter(models.LabelerReliabilitySnapshot.created_at >= cutoff)
+        .order_by(models.LabelerReliabilitySnapshot.created_at.asc())
+        .all()
+    )
+
+    series_map: Dict[int, LabelerSeries] = {}
+    email_map = {x.admin_user_id: x.admin_email for x in latest.items}
+
+    for s in snaps:
+        key = (int(s.admin_user_id), s.created_at)
+        if key not in idx:
+            continue
+        if int(s.admin_user_id) not in series_map:
+            series_map[int(s.admin_user_id)] = LabelerSeries(
+                admin_user_id=int(s.admin_user_id),
+                admin_email=s.admin_email or email_map.get(int(s.admin_user_id)),
+                points=[],
+            )
+        series_map[int(s.admin_user_id)].points.append(
+            {
+                "date": s.created_at.date().isoformat(),
+                "weight": float(s.weight) if s.weight is not None else None,
+                "n_samples": int(s.n_samples),
+            }
+        )
+
+    # preserve top order
+    out = []
+    for aid in top_ids:
+        if aid in series_map:
+            out.append(series_map[aid])
+
+    return LabelerTimeseriesResp(days=int(days), window_days=int(window_days), series=out)
