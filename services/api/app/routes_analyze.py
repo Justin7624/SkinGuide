@@ -6,11 +6,9 @@ from .db import get_db
 from .config import settings
 from .security import rate_limit_or_429
 from . import models, schemas
-from .donation import store_roi_donation
+from .donation import store_roi_donation, store_progress_roi
 import httpx
-import os
 import json
-import uuid
 import base64
 
 router = APIRouter(prefix="/v1", tags=["analyze"])
@@ -30,9 +28,7 @@ def build_plan(attributes, quality):
     routine_pm = ["Gentle cleanser", "Moisturizer"]
 
     pro = []
-    seek_care = [
-        "Seek care for rapidly changing spots, bleeding lesions, severe pain, or persistent worsening."
-    ]
+    seek_care = ["Seek care for rapidly changing spots, bleeding lesions, severe pain, or persistent worsening."]
 
     if not conservative and s.get("uneven_tone_appearance", 0) > 0.6:
         routine_am.insert(1, "Vitamin C (start low, patch test)")
@@ -106,15 +102,10 @@ async def analyze(
         "model_version": payload["model_version"],
         "stored_for_progress": False,
         "roi_sha256": roi_sha or None,
-        "donation": {
-            "enabled": bool(donate_opt_in),
-            "stored": False,
-            "reason": None,
-            "roi_sha256": roi_sha or None,
-        }
+        "donation": {"enabled": bool(donate_opt_in), "stored": False, "reason": None, "roi_sha256": roi_sha or None},
     }
 
-    # Decode ROI bytes (NOT the original upload) for optional storage/donation
+    # Decode ROI bytes from ML output
     roi_b64 = payload.get("roi_jpeg_b64")
     roi_bytes = None
     if roi_b64:
@@ -123,26 +114,18 @@ async def analyze(
         except Exception:
             roi_bytes = None
 
-    # Store progress (ROI-only) ONLY if user opted in AND server storage enabled
-    if store_progress and settings.STORE_IMAGES_ENABLED and roi_bytes:
-        os.makedirs(settings.IMAGE_STORE_DIR, exist_ok=True)
-        sha12 = roi_sha[:12] if roi_sha else ""
-        fname = f"{uuid.uuid4()}_{sha12}.jpg" if sha12 else f"{uuid.uuid4()}.jpg"
-        fpath = os.path.join(settings.IMAGE_STORE_DIR, fname)
-
-        with open(fpath, "wb") as f:
-            f.write(roi_bytes)
-
-        entry = models.ProgressEntry(
+    # Store progress ROI if opted-in (ROI-only)
+    if store_progress and roi_bytes:
+        stored, reason, _uri = store_progress_roi(
+            db=db,
             session_id=session_id,
-            roi_image_path=fpath,
-            result_json=json.dumps(resp),
+            roi_sha256=roi_sha,
+            roi_bytes=roi_bytes,
+            result_json_str=json.dumps(resp),
         )
-        db.add(entry)
-        db.commit()
-        resp["stored_for_progress"] = True
+        resp["stored_for_progress"] = bool(stored)
 
-    # Auto-donate (ROI-only) ONLY if user opted in
+    # Auto-donate (ROI-only) if opted-in
     if donate_opt_in:
         if not roi_bytes or not roi_sha:
             resp["donation"]["stored"] = False
