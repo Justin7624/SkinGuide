@@ -38,11 +38,14 @@ _HTML = r"""<!doctype html>
     canvas{position:absolute;left:0;top:0;pointer-events:none}
     .sliderrow{display:grid;grid-template-columns:260px 1fr 64px;gap:10px;align-items:center;margin-top:8px}
     .rowline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .hr{height:1px;background:rgba(255,255,255,.08);margin:10px 0}
-    .ok{color:var(--ok)}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap}
+    .tab{padding:8px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:#0f1118;color:var(--muted);cursor:pointer}
+    .tab.active{background:rgba(124,92,255,.18);border-color:rgba(124,92,255,.45);color:var(--ink)}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,.12);font-size:12px;color:var(--muted)}
     .badc{color:var(--bad)}
-    .kbd{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;border:1px solid rgba(255,255,255,.16);border-bottom-width:2px;border-radius:8px;padding:2px 6px;color:var(--muted);font-size:12px}
-    pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0;max-height:360px;overflow:auto}
+    .drawer{position:fixed;right:16px;top:16px;bottom:16px;width:min(560px, calc(100vw - 32px));background:var(--card);
+      border:1px solid rgba(255,255,255,.12);border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:14px;overflow:auto}
   </style>
 </head>
 <body>
@@ -51,13 +54,9 @@ _HTML = r"""<!doctype html>
     <div>
       <div class="title">SkinGuide Admin</div>
       <div class="muted small" id="who">Not signed in</div>
-      <div class="muted small">
-        Hotkeys: <span class="kbd">Enter</span> submit, <span class="kbd">X</span> skip, <span class="kbd">N</span> next, <span class="kbd">P</span> prev,
-        <span class="kbd">1-8</span> focus slider, <span class="kbd">←/→</span> adjust, <span class="kbd">Z</span> focus zoom
-      </div>
+      <div class="muted small">Hotkeys: Enter submit, X skip, N next, P prev, 1-8 focus slider, ←/→ adjust, Z focus zoom</div>
     </div>
     <div class="rowline">
-      <button id="btnRefresh" class="hide" onclick="refreshAll()">Refresh</button>
       <button id="btnLogout" class="hide" onclick="logout()">Logout</button>
     </div>
   </div>
@@ -83,19 +82,28 @@ _HTML = r"""<!doctype html>
     <div class="card span4"><div class="k">Analyzes (24h)</div><div class="v" id="an24">—</div></div>
     <div class="card span4"><div class="k">Active Model</div><div class="v" id="activeModel" style="font-size:18px">—</div></div>
 
-    <div class="card span4"><div class="k">Donations</div><div class="v" id="donations">—</div><div class="muted small">Withdrawn: <span id="withdrawn">—</span></div></div>
-    <div class="card span4"><div class="k">Labeled (final)</div><div class="v" id="labeled">—</div></div>
-    <div class="card span4"><div class="k">Consent opt-in</div><div class="muted small">Progress: <span id="optProg">—</span>%</div><div class="muted small">Donate: <span id="optDon">—</span>%</div></div>
-
-    <!-- Label queue -->
     <div class="card span12">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-        <div>
-          <div class="k">Label queue (consensus: 2 distinct labelers)</div>
-          <div class="muted small">Region overlay pulled from metadata_json.regions[].bbox; per-region labels stored separately.</div>
+      <div class="rowline" style="justify-content:space-between">
+        <div class="tabs">
+          <div class="tab active" id="tabQueue" onclick="setTab('queue')">Queue</div>
+          <div class="tab" id="tabConf" onclick="setTab('conf')">Conflicts <span class="badge" id="confCount">—</span></div>
+          <div class="tab" id="tabIrr" onclick="setTab('irr')">IRR stats</div>
         </div>
         <div class="rowline">
-          <button onclick="loadQueue()">Load queue</button>
+          <button onclick="refreshAll()">Refresh</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main panel -->
+    <div class="card span12" id="panelMain">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div>
+          <div class="k" id="panelTitle">Label queue</div>
+          <div class="muted small" id="panelSubtitle">Normal queue excludes conflicts. Conflicts tab shows mixed/disagreement samples.</div>
+        </div>
+        <div class="rowline">
+          <button onclick="loadQueue()">Load</button>
           <button onclick="prevItem()">Prev</button>
           <button onclick="nextItem()">Next</button>
           <span class="muted small" id="qStatus">—</span>
@@ -122,7 +130,7 @@ _HTML = r"""<!doctype html>
 
           <div class="rowline" style="margin-top:10px">
             <select id="regionSel" style="min-width:260px"></select>
-            <span class="muted small">Tip: label “Global” first, then regions.</span>
+            <span class="muted small">Global + per-region</span>
           </div>
 
           <div class="sliderrow"><div>1) uneven_tone_appearance</div><input type="range" min="0" max="100" value="0" id="s_uneven"/><div id="v_uneven">0</div></div>
@@ -134,47 +142,71 @@ _HTML = r"""<!doctype html>
           <div class="sliderrow"><div>7) fine_lines_appearance</div><input type="range" min="0" max="100" value="0" id="s_lines"/><div id="v_lines">0</div></div>
           <div class="sliderrow"><div>8) dryness_flaking_appearance</div><input type="range" min="0" max="100" value="0" id="s_dry"/><div id="v_dry">0</div></div>
 
-          <div class="rowline" style="margin-top:14px">
-            <select id="fitz">
-              <option value="">Fitzpatrick (optional)</option>
-              <option>I</option><option>II</option><option>III</option><option>IV</option><option>V</option><option>VI</option>
-            </select>
-            <select id="age">
-              <option value="">Age band (optional)</option>
-              <option>&lt;18</option><option>18-24</option><option>25-34</option><option>35-44</option><option>45-54</option><option>55-64</option><option>65+</option>
-            </select>
-          </div>
-
           <div class="rowline" style="margin-top:12px">
             <button class="good" onclick="submitLabel()">Submit label</button>
             <button class="bad" onclick="skipLabel()">Skip</button>
-            <button onclick="openSubmissions()">View submissions</button>
+            <button onclick="reviewConflict()">Review</button>
+            <button class="bad hide" id="btnForce" onclick="forceFinalize()">Force finalize (admin)</button>
           </div>
 
           <div class="small" id="qErr" style="margin-top:10px;color:var(--bad)"></div>
-          <pre id="subsOut" class="hide" style="margin-top:10px"></pre>
         </div>
       </div>
     </div>
+
+    <!-- IRR panel -->
+    <div class="card span12 hide" id="panelIRR">
+      <div class="rowline" style="justify-content:space-between">
+        <div>
+          <div class="k">Inter-rater reliability</div>
+          <div class="muted small">Computed on latest 2 distinct non-skip submissions per sample in window.</div>
+        </div>
+        <div class="rowline">
+          <select id="irrDays">
+            <option value="7">7d</option>
+            <option value="30" selected>30d</option>
+            <option value="90">90d</option>
+            <option value="365">365d</option>
+          </select>
+          <button onclick="loadIRR()">Load</button>
+        </div>
+      </div>
+      <pre id="irrOut" style="margin-top:12px">—</pre>
+    </div>
   </div>
+</div>
+
+<div class="drawer hide" id="drawer">
+  <div class="rowline" style="justify-content:space-between;align-items:center">
+    <div>
+      <div style="font-weight:900">Conflict review</div>
+      <div class="muted small" id="drawerSub">—</div>
+    </div>
+    <button onclick="closeDrawer()">Close</button>
+  </div>
+  <div style="margin-top:10px" class="muted small">Conflict detail</div>
+  <pre id="drawerConflict">—</pre>
+  <div style="margin-top:10px" class="muted small">Suggested final (if any)</div>
+  <pre id="drawerSuggested">—</pre>
+  <div style="margin-top:10px" class="muted small">Submissions</div>
+  <pre id="drawerSubs">—</pre>
 </div>
 
 <script>
   let csrf = null;
   let me = null;
 
+  let tab = "queue"; // queue|conf|irr
+
   let queue = [];
   let qIndex = 0;
   let focusedSlider = null;
 
-  // per-sample label state:
-  // { global: {k:0..1}, regions: {regionName:{k:0..1}} }
   let labelState = { global:{}, regions:{} };
 
   const canvas = document.getElementById('qCanvas');
   const ctx = canvas.getContext('2d');
   const img = document.getElementById('qImg');
-  const stage = document.getElementById('stage');
   const zoom = document.getElementById('zoom');
   const zoomVal = document.getElementById('zoomVal');
   const regionSel = document.getElementById('regionSel');
@@ -192,17 +224,13 @@ _HTML = r"""<!doctype html>
 
   function safeJsonParse(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
 
-  function currentRegionKey(){
-    return regionSel.value || "__global__";
-  }
-
+  function currentRegionKey(){ return regionSel.value || "__global__"; }
   function getBucket(){
     const k = currentRegionKey();
     if (k === "__global__") return labelState.global;
     if (!labelState.regions[k]) labelState.regions[k] = {};
     return labelState.regions[k];
   }
-
   function setFromBucket(){
     const b = getBucket();
     for (const [k,sid,vid] of sliders){
@@ -212,7 +240,6 @@ _HTML = r"""<!doctype html>
       document.getElementById(vid).textContent = String(v);
     }
   }
-
   function writeToBucket(){
     const b = getBucket();
     for (const [k,sid,vid] of sliders){
@@ -282,11 +309,9 @@ _HTML = r"""<!doctype html>
 
   async function logout(){
     try{ await api('/v1/admin/auth/logout', {method:'POST'}); }catch(e){}
-    csrf = null;
-    me = null;
+    csrf = null; me = null;
     document.getElementById('dash').classList.add('hide');
     document.getElementById('loginPanel').classList.remove('hide');
-    document.getElementById('btnRefresh').classList.add('hide');
     document.getElementById('btnLogout').classList.add('hide');
     document.getElementById('who').textContent = 'Not signed in';
   }
@@ -295,11 +320,9 @@ _HTML = r"""<!doctype html>
     const r = await api('/v1/admin/auth/me');
     me = await r.json();
     csrf = me.csrf_token;
-
     document.getElementById('who').textContent = `Signed in: ${me.email} (${me.role})`;
     document.getElementById('loginPanel').classList.add('hide');
     document.getElementById('dash').classList.remove('hide');
-    document.getElementById('btnRefresh').classList.remove('hide');
     document.getElementById('btnLogout').classList.remove('hide');
     await refreshAll();
   }
@@ -307,6 +330,7 @@ _HTML = r"""<!doctype html>
   async function refreshAll(){
     await loadSummary();
     await loadQueue();
+    await loadConfCount();
   }
 
   async function loadSummary(){
@@ -315,11 +339,26 @@ _HTML = r"""<!doctype html>
     document.getElementById('sessions').textContent = j.total_sessions;
     document.getElementById('an24').textContent = j.total_analyzes_24h;
     document.getElementById('activeModel').textContent = j.active_model_version || '—';
-    document.getElementById('donations').textContent = j.total_donations;
-    document.getElementById('withdrawn').textContent = j.total_donations_withdrawn;
-    document.getElementById('labeled').textContent = j.total_labeled;
-    document.getElementById('optProg').textContent = j.consent_opt_in_progress_pct;
-    document.getElementById('optDon').textContent = j.consent_opt_in_donate_pct;
+  }
+
+  function setTab(next){
+    tab = next;
+    document.getElementById('tabQueue').classList.toggle('active', tab==='queue');
+    document.getElementById('tabConf').classList.toggle('active', tab==='conf');
+    document.getElementById('tabIrr').classList.toggle('active', tab==='irr');
+
+    document.getElementById('panelMain').classList.toggle('hide', tab==='irr');
+    document.getElementById('panelIRR').classList.toggle('hide', tab!=='irr');
+
+    if (tab==='queue'){
+      document.getElementById('panelTitle').textContent = 'Label queue';
+      document.getElementById('panelSubtitle').textContent = 'Normal queue excludes conflicts.';
+      loadQueue();
+    } else if (tab==='conf'){
+      document.getElementById('panelTitle').textContent = 'Conflicts queue';
+      document.getElementById('panelSubtitle').textContent = 'Mixed skip/label or disagreement. Use Review + (admin) Force finalize.';
+      loadConflicts();
+    }
   }
 
   function fitCanvasToImage(){
@@ -347,26 +386,17 @@ _HTML = r"""<!doctype html>
     for (const r of meta.regions){
       const b = r.bbox || r.bounding_box || null;
       if (!b) continue;
-      const x = b.x ?? b.left ?? 0;
-      const y = b.y ?? b.top ?? 0;
-      const w = b.w ?? b.width ?? 0;
-      const h = b.h ?? b.height ?? 0;
+      const x = b.x ?? 0;
+      const y = b.y ?? 0;
+      const w = b.w ?? 0;
+      const h = b.h ?? 0;
       const name = (r.name || r.region || "region").toString();
-
       const isSel = (selected !== "__global__" && name === selected);
 
       ctx.strokeStyle = isSel ? "rgba(37,208,166,0.95)" : "rgba(124,92,255,0.85)";
       ctx.fillStyle = isSel ? "rgba(37,208,166,0.18)" : "rgba(124,92,255,0.12)";
       ctx.fillRect(x,y,w,h);
       ctx.strokeRect(x,y,w,h);
-
-      const label = name;
-      const pad = 6;
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = "rgba(0,0,0,0.55)";
-      ctx.fillRect(x, Math.max(0,y-26), tw+pad*2, 24);
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.fillText(label, x+pad, Math.max(0,y-24));
     }
   }
 
@@ -378,9 +408,7 @@ _HTML = r"""<!doctype html>
 
   function resetStateForSample(meta){
     labelState = { global:{}, regions:{} };
-    document.getElementById('fitz').value = '';
-    document.getElementById('age').value = '';
-    // region options
+
     regionSel.innerHTML = '';
     const optG = document.createElement('option');
     optG.value = "__global__";
@@ -403,38 +431,42 @@ _HTML = r"""<!doctype html>
 
   function showQueueItem(){
     document.getElementById('qErr').textContent = '';
-    document.getElementById('subsOut').classList.add('hide');
+    document.getElementById('qConflict').textContent = '';
+    document.getElementById('btnForce').classList.add('hide');
 
     if (!queue.length){
-      document.getElementById('qStatus').textContent = 'Queue empty';
+      document.getElementById('qStatus').textContent = 'Empty';
       img.src = '';
       document.getElementById('qId').textContent = '—';
       document.getElementById('qSha').textContent = '—';
       document.getElementById('qMeta').textContent = '—';
       document.getElementById('qSubs').textContent = '—';
-      document.getElementById('qConflict').textContent = '';
       ctx.clearRect(0,0,canvas.width,canvas.height);
       return;
     }
+
     const it = queue[qIndex];
     document.getElementById('qStatus').textContent = `${qIndex+1}/${queue.length}`;
     document.getElementById('qId').textContent = it.id;
     document.getElementById('qSha').textContent = it.roi_sha256;
     document.getElementById('qSubs').textContent = String(it.label_submissions || 0);
-    document.getElementById('qConflict').textContent = it.conflict ? "CONFLICT / NEEDS REVIEW" : "";
+
+    if (it.conflict){
+      document.getElementById('qConflict').textContent = 'CONFLICT';
+      if (me && me.role === 'admin') document.getElementById('btnForce').classList.remove('hide');
+    }
 
     const meta = safeJsonParse(it.metadata_json || '');
     const metaTxt = meta ? JSON.stringify({regions:(meta.regions||[]).map(r=>({name:r.name, bbox:r.bbox}))}, null, 2) : (it.metadata_json || '');
     document.getElementById('qMeta').textContent = (metaTxt || '').slice(0,900);
 
     resetStateForSample(meta);
-
     img.src = it.image_url;
   }
 
   async function loadQueue(){
     try{
-      const r = await api('/v1/admin/label-queue/next?limit=20');
+      const r = await api('/v1/admin/label-queue/next?limit=25');
       const j = await r.json();
       queue = j.items || [];
       qIndex = 0;
@@ -444,58 +476,53 @@ _HTML = r"""<!doctype html>
     }
   }
 
-  function nextItem(){
-    if (!queue.length) return;
-    qIndex = Math.min(queue.length-1, qIndex+1);
-    showQueueItem();
-  }
-  function prevItem(){
-    if (!queue.length) return;
-    qIndex = Math.max(0, qIndex-1);
-    showQueueItem();
-  }
-
-  async function openSubmissions(){
-    document.getElementById('qErr').textContent = '';
-    if (!queue.length) return;
-    const it = queue[qIndex];
+  async function loadConflicts(){
     try{
-      const r = await api(`/v1/admin/label-queue/${it.id}/submissions`);
+      const r = await api('/v1/admin/label-queue/conflicts?limit=50');
       const j = await r.json();
-      const out = document.getElementById('subsOut');
-      out.textContent = JSON.stringify(j, null, 2);
-      out.classList.remove('hide');
+      queue = j.items || [];
+      qIndex = 0;
+      showQueueItem();
     }catch(e){
       document.getElementById('qErr').textContent = String(e);
     }
   }
 
+  async function loadConfCount(){
+    try{
+      const r = await api('/v1/admin/label-queue/conflicts?limit=1');
+      const j = await r.json();
+      // backend doesn't return total, so we estimate by fetching 50 quickly:
+      const r2 = await api('/v1/admin/label-queue/conflicts?limit=50');
+      const j2 = await r2.json();
+      document.getElementById('confCount').textContent = (j2.items||[]).length;
+    }catch(e){
+      document.getElementById('confCount').textContent = '—';
+    }
+  }
+
+  function nextItem(){ if (!queue.length) return; qIndex = Math.min(queue.length-1, qIndex+1); showQueueItem(); }
+  function prevItem(){ if (!queue.length) return; qIndex = Math.max(0, qIndex-1); showQueueItem(); }
+
   async function submitLabel(){
     document.getElementById('qErr').textContent = '';
     if (!queue.length) return;
     const it = queue[qIndex];
-
-    // ensure latest slider values saved
     writeToBucket();
 
     const labels = labelState.global || {};
     const region_labels = labelState.regions || {};
-    const fitz = document.getElementById('fitz').value || null;
-    const age = document.getElementById('age').value || null;
 
     try{
-      const r = await api(`/v1/admin/label-queue/${it.id}/label`, {
+      await api(`/v1/admin/label-queue/${it.id}/label`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({labels, region_labels, fitzpatrick: fitz, age_band: age})
+        body: JSON.stringify({labels, region_labels})
       });
-      const j = await r.json();
-
-      // remove item if finalized, else keep but advance
-      const finalized = j.finalize && j.finalize.finalized;
       queue.splice(qIndex,1);
       if (qIndex >= queue.length) qIndex = Math.max(0, queue.length-1);
       showQueueItem();
+      loadConfCount();
     }catch(e){
       document.getElementById('qErr').textContent = String(e);
     }
@@ -506,18 +533,79 @@ _HTML = r"""<!doctype html>
     if (!queue.length) return;
     const it = queue[qIndex];
     try{
-      const r = await api(`/v1/admin/label-queue/${it.id}/skip`, {
+      await api(`/v1/admin/label-queue/${it.id}/skip`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({reason:"admin_skip"})
       });
-      const j = await r.json();
       queue.splice(qIndex,1);
       if (qIndex >= queue.length) qIndex = Math.max(0, queue.length-1);
       showQueueItem();
+      loadConfCount();
     }catch(e){
       document.getElementById('qErr').textContent = String(e);
     }
+  }
+
+  // -------- Conflict review drawer --------
+  function openDrawer(){ document.getElementById('drawer').classList.remove('hide'); }
+  function closeDrawer(){ document.getElementById('drawer').classList.add('hide'); }
+
+  async function reviewConflict(){
+    document.getElementById('qErr').textContent = '';
+    if (!queue.length) return;
+    const it = queue[qIndex];
+    try{
+      const r = await api(`/v1/admin/label-queue/${it.id}/review`);
+      const j = await r.json();
+      document.getElementById('drawerSub').textContent = `Sample ${j.donated_sample_id} · ${j.roi_sha256}`;
+      document.getElementById('drawerConflict').textContent = JSON.stringify(j.conflict_detail || {}, null, 2);
+      document.getElementById('drawerSuggested').textContent = JSON.stringify(j.suggested_final || null, null, 2);
+      document.getElementById('drawerSubs').textContent = JSON.stringify(j.submissions || [], null, 2);
+      openDrawer();
+    }catch(e){
+      document.getElementById('qErr').textContent = String(e);
+    }
+  }
+
+  async function forceFinalize(){
+    document.getElementById('qErr').textContent = '';
+    if (!queue.length) return;
+    if (!me || me.role !== 'admin'){
+      document.getElementById('qErr').textContent = 'Force finalize requires admin role.';
+      return;
+    }
+    const it = queue[qIndex];
+    writeToBucket();
+
+    const final = {
+      labels: labelState.global || {},
+      region_labels: labelState.regions || {},
+      note: "force-finalized from UI",
+    };
+
+    try{
+      await api(`/v1/admin/label-queue/${it.id}/force-finalize`, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({final})
+      });
+      queue.splice(qIndex,1);
+      if (qIndex >= queue.length) qIndex = Math.max(0, queue.length-1);
+      showQueueItem();
+      closeDrawer();
+      loadConfCount();
+    }catch(e){
+      document.getElementById('qErr').textContent = String(e);
+    }
+  }
+
+  // -------- IRR --------
+  async function loadIRR(){
+    const days = document.getElementById('irrDays').value;
+    const r = await api(`/v1/admin/label-queue/stats/irr?days=${encodeURIComponent(days)}`);
+    const j = await r.json();
+    document.getElementById('irrOut').textContent = JSON.stringify(j, null, 2);
   }
 
   // -------- Hotkeys --------
@@ -533,7 +621,6 @@ _HTML = r"""<!doctype html>
     if (document.getElementById('dash').classList.contains('hide')) return;
 
     const k = ev.key;
-
     if (k === 'Enter'){ ev.preventDefault(); submitLabel(); return; }
     if (k === 'x' || k === 'X'){ ev.preventDefault(); skipLabel(); return; }
     if (k === 'n' || k === 'N'){ ev.preventDefault(); nextItem(); return; }
@@ -567,18 +654,16 @@ _HTML = r"""<!doctype html>
     }
   });
 
-  // Auto-detect session
+  // Auto-login
   (async ()=>{
     try{
       const r = await api('/v1/admin/auth/me');
       const j = await r.json();
       if (j && j.ok){
-        me = j;
-        csrf = j.csrf_token;
+        me = j; csrf = j.csrf_token;
         document.getElementById('who').textContent = `Signed in: ${j.email} (${j.role})`;
         document.getElementById('loginPanel').classList.add('hide');
         document.getElementById('dash').classList.remove('hide');
-        document.getElementById('btnRefresh').classList.remove('hide');
         document.getElementById('btnLogout').classList.remove('hide');
         await refreshAll();
       }
