@@ -57,11 +57,7 @@ class AnalyzeResponse(BaseModel):
     when_to_seek_care: List[str]
     model_version: str
     stored_for_progress: bool = False
-
-    # Attach labels/donations to the same ROI sample
     roi_sha256: Optional[str] = None
-
-    # NEW: donation status for “learning loop”
     donation: DonationInfo = Field(default_factory=DonationInfo)
 
 class ConsentUpsert(BaseModel):
@@ -79,10 +75,6 @@ class DonateResponse(BaseModel):
     roi_sha256: Optional[str] = None
 
 class LabelUpsert(BaseModel):
-    """
-    Sparse labels allowed: provide only what the user wants to label.
-    Values are normalized 0..1 (e.g. mild=0.33, moderate=0.66, severe=1.0).
-    """
     roi_sha256: str
     labels: Dict[AttributeKey, float] = Field(default_factory=dict)
     fitzpatrick: Optional[Literal["I","II","III","IV","V","VI"]] = None
@@ -93,3 +85,26 @@ class LabelResponse(BaseModel):
     stored: bool
     reason: Optional[str] = None
     roi_sha256: Optional[str] = None
+
+# --- Model registry ---
+
+class ModelRegisterRequest(BaseModel):
+    version: str
+    model_uri: str
+    manifest_uri: str
+    metrics_json: Optional[str] = None
+
+class ModelInfo(BaseModel):
+    version: str
+    model_uri: str
+    manifest_uri: str
+    is_active: bool
+    created_at: str
+
+class ModelActivateRequest(BaseModel):
+    version: str
+
+class ModelActivateResponse(BaseModel):
+    ok: bool
+    active_version: Optional[str] = None
+    reason: Optional[str] = None
