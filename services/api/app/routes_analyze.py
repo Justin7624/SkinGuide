@@ -1,3 +1,5 @@
+# services/api/app/routes_analyze.py
+
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session as OrmSession
 from .db import get_db
@@ -105,6 +107,8 @@ async def analyze(
         "disclaimer": DISCLAIMER,
         "quality": payload["quality"],
         "attributes": payload["attributes"],
+        # NEW: include region breakdown
+        "regions": payload.get("regions", []),
         "routine": plan["routine"],
         "professional_to_discuss": plan["pro"],
         "when_to_seek_care": plan["seek_care"],
