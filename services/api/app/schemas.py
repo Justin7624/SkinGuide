@@ -41,6 +41,12 @@ class RegionResult(BaseModel):
     attributes: List[AttributeScore] = Field(default_factory=list)
     status: Literal["ok", "insufficient_skin"] = "ok"
 
+class DonationInfo(BaseModel):
+    enabled: bool = False
+    stored: bool = False
+    reason: Optional[str] = None
+    roi_sha256: Optional[str] = None
+
 class AnalyzeResponse(BaseModel):
     disclaimer: str
     quality: QualityReport
@@ -52,8 +58,11 @@ class AnalyzeResponse(BaseModel):
     model_version: str
     stored_for_progress: bool = False
 
-    # NEW: used to attach labels/donations to the same ROI sample
+    # Attach labels/donations to the same ROI sample
     roi_sha256: Optional[str] = None
+
+    # NEW: donation status for “learning loop”
+    donation: DonationInfo = Field(default_factory=DonationInfo)
 
 class ConsentUpsert(BaseModel):
     store_progress_images: bool
@@ -76,7 +85,6 @@ class LabelUpsert(BaseModel):
     """
     roi_sha256: str
     labels: Dict[AttributeKey, float] = Field(default_factory=dict)
-    # Optional metadata (helps fairness analysis if voluntarily provided)
     fitzpatrick: Optional[Literal["I","II","III","IV","V","VI"]] = None
     age_band: Optional[Literal["<18","18-24","25-34","35-44","45-54","55-64","65+"]] = None
 
