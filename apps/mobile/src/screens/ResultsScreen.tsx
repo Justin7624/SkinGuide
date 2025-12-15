@@ -8,6 +8,13 @@ function topAttrs(attrs: any[], n: number) {
   return [...attrs].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, n);
 }
 
+function donationText(d: any) {
+  if (!d?.enabled) return "Donation: OFF (not opted in)";
+  if (d?.stored) return "Donation: ✅ Stored (ROI-only)";
+  if (d?.reason === "already_donated") return "Donation: ✅ Already donated (ROI-only)";
+  return `Donation: ❌ Not stored (${d?.reason ?? "unknown"})`;
+}
+
 export default function ResultsScreen(props: {
   result: any;
   onNewScan: () => void;
@@ -23,6 +30,16 @@ export default function ResultsScreen(props: {
       <Text>Model: {r.model_version}</Text>
       {r.stored_for_progress ? <Text>✅ Stored for progress (opt-in)</Text> : <Text>🛡️ Not stored</Text>}
       {r.roi_sha256 ? <Text selectable>ROI id: {r.roi_sha256}</Text> : null}
+
+      <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
+        <Text style={{ fontWeight: "700" }}>AI improvement</Text>
+        <Text>{donationText(r.donation)}</Text>
+        {!props.canLabel && (
+          <Text style={{ marginTop: 6, opacity: 0.75 }}>
+            Labeling is enabled only when the scan was donated (ROI-only) so your labels attach to a stored sample.
+          </Text>
+        )}
+      </View>
 
       <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
         <Text style={{ fontWeight: "700" }}>Overall quality</Text>
@@ -83,24 +100,6 @@ export default function ResultsScreen(props: {
         {r.routine?.PM?.map?.((x: string) => <Text key={`pm-${x}`}>• {x}</Text>) ?? <Text>—</Text>}
       </View>
 
-      <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
-        <Text style={{ fontWeight: "700" }}>Professional options to discuss</Text>
-        {Array.isArray(r.professional_to_discuss) && r.professional_to_discuss.length ? (
-          r.professional_to_discuss.map((x: string) => <Text key={x}>• {x}</Text>)
-        ) : (
-          <Text>—</Text>
-        )}
-      </View>
-
-      <View style={{ padding: 12, borderWidth: 1, borderRadius: 12 }}>
-        <Text style={{ fontWeight: "700" }}>When to seek care</Text>
-        {Array.isArray(r.when_to_seek_care) && r.when_to_seek_care.length ? (
-          r.when_to_seek_care.map((x: string) => <Text key={x}>• {x}</Text>)
-        ) : (
-          <Text>—</Text>
-        )}
-      </View>
-
       <View style={{ flexDirection: "row", gap: 12 }}>
         <Pressable onPress={props.onNewScan} style={{ flex: 1, padding: 14, borderRadius: 12, backgroundColor: "black" }}>
           <Text style={{ color: "white", textAlign: "center", fontWeight: "700" }}>New scan</Text>
@@ -120,10 +119,6 @@ export default function ResultsScreen(props: {
           <Text style={{ textAlign: "center", fontWeight: "700" }}>Label scan</Text>
         </Pressable>
       </View>
-
-      <Text style={{ opacity: 0.7 }}>
-        Note: Labels are only saved if you opted in to donate data for improvement and the ROI was donated.
-      </Text>
     </ScrollView>
   );
 }
