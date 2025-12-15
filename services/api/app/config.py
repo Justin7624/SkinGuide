@@ -11,9 +11,10 @@ class Settings(BaseSettings):
     STORE_IMAGES_ENABLED: bool = False
     IMAGE_STORE_DIR: str = "/data/images"
 
-    # Donation pipeline: ROI-only storage, consent-gated
+    # Donation pipeline (ROI-only)
     DONATION_STORAGE_ENABLED: bool = False
     DONATION_STORE_DIR: str = "/data/donations"
+    DONATION_LABEL_DIR: str = "/data/donations/labels"
 
     SESSION_SECRET: str
     RATE_LIMIT_PER_MIN: int = 20
