@@ -22,13 +22,11 @@ _HTML = r"""<!doctype html>
     .k{color:var(--muted);font-size:12px}
     .v{font-size:22px;font-weight:900;margin-top:4px}
     input,button,select,textarea{background:#0f1118;color:var(--ink);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:10px 12px}
-    textarea{width:100%;min-height:70px}
     button{cursor:pointer}
     button.primary{background:var(--accent);border:none;font-weight:900}
     button.good{background:rgba(37,208,166,.2);border:1px solid rgba(37,208,166,.35);font-weight:800}
     button.bad{background:rgba(255,107,107,.15);border:1px solid rgba(255,107,107,.35);font-weight:800}
     .span4{grid-column:span 4}
-    .span6{grid-column:span 6}
     .span12{grid-column:span 12}
     .muted{color:var(--muted)}
     .small{font-size:12px}
@@ -39,15 +37,12 @@ _HTML = r"""<!doctype html>
     img{display:block;max-width:none}
     canvas{position:absolute;left:0;top:0;pointer-events:none}
     .sliderrow{display:grid;grid-template-columns:260px 1fr 64px;gap:10px;align-items:center;margin-top:8px}
-    .tag{display:inline-block;padding:4px 8px;border-radius:999px;background:rgba(124,92,255,.15);border:1px solid rgba(124,92,255,.35);font-size:12px}
-    table{width:100%;border-collapse:collapse}
-    th,td{font-size:12px;text-align:left;padding:8px;border-bottom:1px solid rgba(255,255,255,.08);vertical-align:top}
-    pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0}
     .rowline{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
     .hr{height:1px;background:rgba(255,255,255,.08);margin:10px 0}
     .ok{color:var(--ok)}
     .badc{color:var(--bad)}
     .kbd{font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;border:1px solid rgba(255,255,255,.16);border-bottom-width:2px;border-radius:8px;padding:2px 6px;color:var(--muted);font-size:12px}
+    pre{white-space:pre-wrap;word-break:break-word;background:#0f1118;border:1px solid rgba(255,255,255,.08);padding:10px;border-radius:12px;margin:0}
   </style>
 </head>
 <body>
@@ -56,7 +51,10 @@ _HTML = r"""<!doctype html>
     <div>
       <div class="title">SkinGuide Admin</div>
       <div class="muted small" id="who">Not signed in</div>
-      <div class="muted small">Hotkeys: <span class="kbd">Enter</span> submit, <span class="kbd">X</span> skip, <span class="kbd">N</span> next, <span class="kbd">P</span> prev, <span class="kbd">1-8</span> focus slider, <span class="kbd">←/→</span> adjust, <span class="kbd">Z</span> focus zoom</div>
+      <div class="muted small">
+        Hotkeys: <span class="kbd">Enter</span> submit, <span class="kbd">X</span> skip, <span class="kbd">N</span> next, <span class="kbd">P</span> prev,
+        <span class="kbd">1-8</span> focus slider, <span class="kbd">←/→</span> adjust, <span class="kbd">Z</span> focus zoom
+      </div>
     </div>
     <div class="rowline">
       <button id="btnRefresh" class="hide" onclick="refreshAll()">Refresh</button>
@@ -64,7 +62,7 @@ _HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <!-- Login + reset -->
+  <!-- Login -->
   <div class="row" id="loginPanel">
     <div class="card span12">
       <div class="k">Admin login</div>
@@ -76,27 +74,6 @@ _HTML = r"""<!doctype html>
         <button class="primary" onclick="login()">Login</button>
       </div>
       <div class="small" id="loginErr" style="margin-top:8px;color:var(--bad)"></div>
-
-      <div class="hr"></div>
-
-      <div class="k">Password reset</div>
-      <div class="rowline" style="margin-top:10px">
-        <input id="resetEmail" placeholder="email" style="min-width:260px" />
-        <button onclick="resetRequest()">Request reset</button>
-        <span class="muted small" id="resetReqOut">—</span>
-      </div>
-      <div class="rowline" style="margin-top:10px">
-        <input id="resetToken" placeholder="reset token" style="min-width:260px" />
-        <input id="resetNewPw" placeholder="new password" type="password" style="min-width:260px" />
-        <input id="resetTotp" placeholder="2FA code (if enabled)" style="min-width:200px" />
-        <input id="resetRec" placeholder="Recovery code (optional)" style="min-width:240px" />
-        <button class="good" onclick="resetConfirm()">Confirm reset</button>
-      </div>
-      <div class="small" id="resetErr" style="margin-top:8px;color:var(--bad)"></div>
-
-      <div class="muted small" style="margin-top:10px">
-        First-time setup: call <code>/v1/admin/auth/bootstrap</code> with header <code>X-Bootstrap-Token</code>.
-      </div>
     </div>
   </div>
 
@@ -107,67 +84,15 @@ _HTML = r"""<!doctype html>
     <div class="card span4"><div class="k">Active Model</div><div class="v" id="activeModel" style="font-size:18px">—</div></div>
 
     <div class="card span4"><div class="k">Donations</div><div class="v" id="donations">—</div><div class="muted small">Withdrawn: <span id="withdrawn">—</span></div></div>
-    <div class="card span4"><div class="k">Labeled</div><div class="v" id="labeled">—</div></div>
+    <div class="card span4"><div class="k">Labeled (final)</div><div class="v" id="labeled">—</div></div>
     <div class="card span4"><div class="k">Consent opt-in</div><div class="muted small">Progress: <span id="optProg">—</span>%</div><div class="muted small">Donate: <span id="optDon">—</span>%</div></div>
-
-    <!-- 2FA panel -->
-    <div class="card span12">
-      <div class="k">Account security (2FA)</div>
-      <div class="rowline" style="margin-top:10px">
-        <span class="muted small">2FA status: <span id="twofaStatus">—</span></span>
-        <button onclick="twofaStart()">Start 2FA</button>
-        <input id="twofaCode" placeholder="Enter code from app" style="min-width:220px" />
-        <button class="good" onclick="twofaConfirm()">Confirm</button>
-        <input id="twofaDisablePw" placeholder="password to disable" type="password" style="min-width:220px" />
-        <input id="twofaDisableCode" placeholder="code (or use recovery)" style="min-width:220px" />
-        <input id="twofaDisableRec" placeholder="recovery code" style="min-width:220px" />
-        <button class="bad" onclick="twofaDisable()">Disable</button>
-      </div>
-      <div class="rowline" style="margin-top:10px">
-        <div class="imgbox" style="max-width:320px">
-          <div class="muted small">QR (scan in authenticator)</div>
-          <div style="margin-top:8px"><img id="twofaQr" style="width:100%;height:auto"/></div>
-          <div class="muted small" style="margin-top:8px">Secret: <span id="twofaSecret">—</span></div>
-        </div>
-        <div style="flex:1">
-          <div class="muted small">Recovery codes (shown once after confirm):</div>
-          <pre id="recoveryOut">—</pre>
-          <div class="small" id="twofaErr" style="margin-top:8px;color:var(--bad)"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Metrics -->
-    <div class="card span12">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-        <div>
-          <div class="k">Metrics</div>
-          <div class="muted small">Time series (last N days)</div>
-        </div>
-        <div class="rowline">
-          <select id="days">
-            <option value="7">7d</option>
-            <option value="30" selected>30d</option>
-            <option value="90">90d</option>
-            <option value="180">180d</option>
-          </select>
-          <button onclick="loadMetrics()">Load metrics</button>
-          <span class="muted small" id="range">—</span>
-        </div>
-      </div>
-      <div style="margin-top:12px" class="small muted">
-        <div><span class="tag">analyzes</span> <span id="sparkA">—</span></div>
-        <div style="margin-top:8px"><span class="tag">donations</span> <span id="sparkD">—</span></div>
-        <div style="margin-top:8px"><span class="tag">labels</span> <span id="sparkL">—</span></div>
-      </div>
-    </div>
 
     <!-- Label queue -->
     <div class="card span12">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div>
-          <div class="k">Label queue</div>
-          <div class="muted small">Per-region overlay from metadata_json.regions[] (bbox) if available.</div>
+          <div class="k">Label queue (consensus: 2 distinct labelers)</div>
+          <div class="muted small">Region overlay pulled from metadata_json.regions[].bbox; per-region labels stored separately.</div>
         </div>
         <div class="rowline">
           <button onclick="loadQueue()">Load queue</button>
@@ -190,7 +115,15 @@ _HTML = r"""<!doctype html>
         </div>
 
         <div>
-          <div class="muted small">Sample: <span id="qId">—</span> / sha: <span id="qSha">—</span></div>
+          <div class="muted small">
+            Sample: <span id="qId">—</span> / sha: <span id="qSha">—</span> · submissions: <span id="qSubs">—</span>
+            <span id="qConflict" class="badc" style="margin-left:10px"></span>
+          </div>
+
+          <div class="rowline" style="margin-top:10px">
+            <select id="regionSel" style="min-width:260px"></select>
+            <span class="muted small">Tip: label “Global” first, then regions.</span>
+          </div>
 
           <div class="sliderrow"><div>1) uneven_tone_appearance</div><input type="range" min="0" max="100" value="0" id="s_uneven"/><div id="v_uneven">0</div></div>
           <div class="sliderrow"><div>2) hyperpigmentation_appearance</div><input type="range" min="0" max="100" value="0" id="s_hyper"/><div id="v_hyper">0</div></div>
@@ -215,30 +148,13 @@ _HTML = r"""<!doctype html>
           <div class="rowline" style="margin-top:12px">
             <button class="good" onclick="submitLabel()">Submit label</button>
             <button class="bad" onclick="skipLabel()">Skip</button>
+            <button onclick="openSubmissions()">View submissions</button>
           </div>
 
           <div class="small" id="qErr" style="margin-top:10px;color:var(--bad)"></div>
+          <pre id="subsOut" class="hide" style="margin-top:10px"></pre>
         </div>
       </div>
-    </div>
-
-    <!-- Audit -->
-    <div class="card span12">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-        <div>
-          <div class="k">Audit (latest)</div>
-          <div class="muted small">Use “Load more” to page backward.</div>
-        </div>
-        <div class="rowline">
-          <button onclick="loadAudit(true)">Refresh audit</button>
-          <button onclick="loadAudit(false)">Load more</button>
-          <span class="muted small" id="auditStatus">—</span>
-        </div>
-      </div>
-      <table style="margin-top:12px">
-        <thead><tr><th>ID</th><th>Time</th><th>Type</th><th>Session</th><th>Payload</th></tr></thead>
-        <tbody id="auditRows"></tbody>
-      </table>
     </div>
   </div>
 </div>
@@ -246,11 +162,14 @@ _HTML = r"""<!doctype html>
 <script>
   let csrf = null;
   let me = null;
-  let auditBeforeId = null;
 
   let queue = [];
   let qIndex = 0;
   let focusedSlider = null;
+
+  // per-sample label state:
+  // { global: {k:0..1}, regions: {regionName:{k:0..1}} }
+  let labelState = { global:{}, regions:{} };
 
   const canvas = document.getElementById('qCanvas');
   const ctx = canvas.getContext('2d');
@@ -258,6 +177,7 @@ _HTML = r"""<!doctype html>
   const stage = document.getElementById('stage');
   const zoom = document.getElementById('zoom');
   const zoomVal = document.getElementById('zoomVal');
+  const regionSel = document.getElementById('regionSel');
 
   const sliders = [
     ["uneven_tone_appearance","s_uneven","v_uneven"],
@@ -270,13 +190,53 @@ _HTML = r"""<!doctype html>
     ["dryness_flaking_appearance","s_dry","v_dry"],
   ];
 
+  function safeJsonParse(s){ try{ return JSON.parse(s); }catch(e){ return null; } }
+
+  function currentRegionKey(){
+    return regionSel.value || "__global__";
+  }
+
+  function getBucket(){
+    const k = currentRegionKey();
+    if (k === "__global__") return labelState.global;
+    if (!labelState.regions[k]) labelState.regions[k] = {};
+    return labelState.regions[k];
+  }
+
+  function setFromBucket(){
+    const b = getBucket();
+    for (const [k,sid,vid] of sliders){
+      const v01 = (b[k] != null) ? b[k] : 0;
+      const v = Math.round(v01 * 100);
+      document.getElementById(sid).value = v;
+      document.getElementById(vid).textContent = String(v);
+    }
+  }
+
+  function writeToBucket(){
+    const b = getBucket();
+    for (const [k,sid,vid] of sliders){
+      const v = parseInt(document.getElementById(sid).value,10);
+      if (v <= 0) { delete b[k]; continue; }
+      b[k] = v / 100.0;
+    }
+  }
+
   for (const [k,sid,vid] of sliders){
     const s = document.getElementById(sid);
     const v = document.getElementById(vid);
-    s.addEventListener('input', ()=> v.textContent = s.value);
+    s.addEventListener('input', ()=>{
+      v.textContent = s.value;
+      writeToBucket();
+    });
     s.addEventListener('focus', ()=> focusedSlider = s);
     v.textContent = s.value;
   }
+
+  regionSel.addEventListener('change', ()=>{
+    setFromBucket();
+    redrawOverlay();
+  });
 
   zoom.addEventListener('input', ()=>{
     zoomVal.textContent = `${zoom.value}%`;
@@ -290,7 +250,6 @@ _HTML = r"""<!doctype html>
     canvas.style.transformOrigin = "0 0";
     img.style.transform = `scale(${z})`;
     canvas.style.transform = `scale(${z})`;
-    // stage scrollbars handle overflow
   }
 
   async function api(path, opts={}){
@@ -336,9 +295,8 @@ _HTML = r"""<!doctype html>
     const r = await api('/v1/admin/auth/me');
     me = await r.json();
     csrf = me.csrf_token;
-    document.getElementById('who').textContent = `Signed in: ${me.email} (${me.role})`;
-    document.getElementById('twofaStatus').innerHTML = me.totp_enabled ? '<span class="ok">enabled</span>' : '<span class="badc">disabled</span>';
 
+    document.getElementById('who').textContent = `Signed in: ${me.email} (${me.role})`;
     document.getElementById('loginPanel').classList.add('hide');
     document.getElementById('dash').classList.remove('hide');
     document.getElementById('btnRefresh').classList.remove('hide');
@@ -348,113 +306,7 @@ _HTML = r"""<!doctype html>
 
   async function refreshAll(){
     await loadSummary();
-    await loadMetrics();
-    await loadAudit(true);
     await loadQueue();
-  }
-
-  // -------- Password reset (debug scaffold) --------
-
-  async function resetRequest(){
-    document.getElementById('resetErr').textContent = '';
-    try{
-      const email = document.getElementById('resetEmail').value.trim();
-      const r = await api('/v1/admin/auth/password-reset/request', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({email})
-      });
-      const j = await r.json();
-      document.getElementById('resetReqOut').textContent = j.token_debug ? `DEBUG token: ${j.token_debug}` : 'Requested (check email if configured)';
-      if (j.token_debug) document.getElementById('resetToken').value = j.token_debug;
-    }catch(e){
-      document.getElementById('resetErr').textContent = String(e);
-    }
-  }
-
-  async function resetConfirm(){
-    document.getElementById('resetErr').textContent = '';
-    try{
-      const token = document.getElementById('resetToken').value.trim();
-      const new_password = document.getElementById('resetNewPw').value;
-      const totp_code = document.getElementById('resetTotp').value.trim() || null;
-      const recovery_code = document.getElementById('resetRec').value.trim() || null;
-      await api('/v1/admin/auth/password-reset/confirm', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({token, new_password, totp_code, recovery_code})
-      });
-      document.getElementById('resetErr').innerHTML = '<span class="ok">Password updated. You can log in now.</span>';
-    }catch(e){
-      document.getElementById('resetErr').textContent = String(e);
-    }
-  }
-
-  // -------- 2FA --------
-
-  async function twofaStart(){
-    document.getElementById('twofaErr').textContent = '';
-    try{
-      const r = await api('/v1/admin/auth/2fa/start', {method:'POST'});
-      const j = await r.json();
-      document.getElementById('twofaSecret').textContent = j.secret || '—';
-      // QR endpoint uses current secret
-      document.getElementById('twofaQr').src = '/v1/admin/auth/2fa/qr';
-      document.getElementById('recoveryOut').textContent = '—';
-    }catch(e){
-      document.getElementById('twofaErr').textContent = String(e);
-    }
-  }
-
-  async function twofaConfirm(){
-    document.getElementById('twofaErr').textContent = '';
-    try{
-      const code = document.getElementById('twofaCode').value.trim();
-      const r = await api('/v1/admin/auth/2fa/confirm', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({code})
-      });
-      const j = await r.json();
-      document.getElementById('recoveryOut').textContent = (j.recovery_codes || []).join('\n') || '—';
-      await initAuthed();
-    }catch(e){
-      document.getElementById('twofaErr').textContent = String(e);
-    }
-  }
-
-  async function twofaDisable(){
-    document.getElementById('twofaErr').textContent = '';
-    try{
-      const password = document.getElementById('twofaDisablePw').value;
-      const code = document.getElementById('twofaDisableCode').value.trim() || null;
-      const recovery_code = document.getElementById('twofaDisableRec').value.trim() || null;
-      await api('/v1/admin/auth/2fa/disable', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({password, code, recovery_code})
-      });
-      document.getElementById('twofaSecret').textContent = '—';
-      document.getElementById('twofaQr').src = '';
-      document.getElementById('recoveryOut').textContent = '—';
-      await initAuthed();
-    }catch(e){
-      document.getElementById('twofaErr').textContent = String(e);
-    }
-  }
-
-  // -------- Summary/Metrics/Audit --------
-
-  function spark(points){
-    if (!points || !points.length) return '—';
-    const vals = points.map(p => p.value);
-    const max = Math.max(...vals, 1);
-    const bars = vals.map(v => {
-      const t = Math.round((v / max) * 8);
-      return "▁▂▃▄▅▆▇█"[Math.max(0, Math.min(7, t))];
-    });
-    const total = vals.reduce((a,b)=>a+b,0);
-    return `${bars.join('')}  (total ${total})`;
   }
 
   async function loadSummary(){
@@ -470,40 +322,7 @@ _HTML = r"""<!doctype html>
     document.getElementById('optDon').textContent = j.consent_opt_in_donate_pct;
   }
 
-  async function loadMetrics(){
-    const days = document.getElementById('days').value;
-    const r = await api(`/v1/admin/metrics?days=${encodeURIComponent(days)}`);
-    const j = await r.json();
-    document.getElementById('range').textContent = `${j.start_date} → ${j.end_date}`;
-    document.getElementById('sparkA').textContent = spark(j.analyzes);
-    document.getElementById('sparkD').textContent = spark(j.donations_created);
-    document.getElementById('sparkL').textContent = spark(j.labels_created);
-  }
-
-  async function loadAudit(reset){
-    if (reset) auditBeforeId = null;
-    const path = auditBeforeId ? `/v1/admin/audit?before_id=${auditBeforeId}&limit=50` : `/v1/admin/audit?limit=50`;
-    const r = await api(path);
-    const j = await r.json();
-    if (reset) document.getElementById('auditRows').innerHTML = '';
-    const tbody = document.getElementById('auditRows');
-    for (const it of j.items){
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${it.id}</td><td class="muted">${it.created_at}</td><td>${it.event_type}</td><td class="muted">${it.session_id || ''}</td><td><pre>${(it.payload_json||'').slice(0,800)}</pre></td>`;
-      tbody.appendChild(tr);
-    }
-    auditBeforeId = j.next_before_id || auditBeforeId;
-    document.getElementById('auditStatus').textContent = auditBeforeId ? `next before_id=${auditBeforeId}` : 'end';
-  }
-
-  // -------- Label queue + overlay --------
-
-  function safeJsonParse(s){
-    try{ return JSON.parse(s); }catch(e){ return null; }
-  }
-
   function fitCanvasToImage(){
-    // match canvas size to natural image size
     canvas.width = img.naturalWidth || 1;
     canvas.height = img.naturalHeight || 1;
     canvas.style.width = (img.naturalWidth || 1) + "px";
@@ -517,11 +336,12 @@ _HTML = r"""<!doctype html>
     if (!queue.length) return;
     const it = queue[qIndex];
     const meta = safeJsonParse(it.metadata_json || '');
-    if (!meta || !meta.regions || !Array.isArray(meta.regions)) return;
+    if (!meta || !Array.isArray(meta.regions)) return;
 
-    // Simple overlay styling
+    const selected = currentRegionKey();
+
     ctx.lineWidth = 3;
-    ctx.font = "18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto";
+    ctx.font = "18px ui-sans-serif, system-ui";
     ctx.textBaseline = "top";
 
     for (const r of meta.regions){
@@ -533,12 +353,13 @@ _HTML = r"""<!doctype html>
       const h = b.h ?? b.height ?? 0;
       const name = (r.name || r.region || "region").toString();
 
-      ctx.strokeStyle = "rgba(124,92,255,0.9)";
-      ctx.fillStyle = "rgba(124,92,255,0.15)";
+      const isSel = (selected !== "__global__" && name === selected);
+
+      ctx.strokeStyle = isSel ? "rgba(37,208,166,0.95)" : "rgba(124,92,255,0.85)";
+      ctx.fillStyle = isSel ? "rgba(37,208,166,0.18)" : "rgba(124,92,255,0.12)";
       ctx.fillRect(x,y,w,h);
       ctx.strokeRect(x,y,w,h);
 
-      // label background
       const label = name;
       const pad = 6;
       const tw = ctx.measureText(label).width;
@@ -555,24 +376,43 @@ _HTML = r"""<!doctype html>
     redrawOverlay();
   });
 
-  function resetSliders(){
-    for (const [k,sid,vid] of sliders){
-      document.getElementById(sid).value = 0;
-      document.getElementById(vid).textContent = '0';
-    }
+  function resetStateForSample(meta){
+    labelState = { global:{}, regions:{} };
     document.getElementById('fitz').value = '';
     document.getElementById('age').value = '';
+    // region options
+    regionSel.innerHTML = '';
+    const optG = document.createElement('option');
+    optG.value = "__global__";
+    optG.textContent = "Global (whole face)";
+    regionSel.appendChild(optG);
+
+    if (meta && Array.isArray(meta.regions)){
+      for (const r of meta.regions){
+        const name = (r.name || r.region || "").toString();
+        if (!name) continue;
+        const o = document.createElement('option');
+        o.value = name;
+        o.textContent = `Region: ${name}`;
+        regionSel.appendChild(o);
+      }
+    }
+    regionSel.value = "__global__";
+    setFromBucket();
   }
 
   function showQueueItem(){
-    const err = document.getElementById('qErr');
-    err.textContent = '';
+    document.getElementById('qErr').textContent = '';
+    document.getElementById('subsOut').classList.add('hide');
+
     if (!queue.length){
       document.getElementById('qStatus').textContent = 'Queue empty';
-      document.getElementById('qImg').src = '';
+      img.src = '';
       document.getElementById('qId').textContent = '—';
       document.getElementById('qSha').textContent = '—';
       document.getElementById('qMeta').textContent = '—';
+      document.getElementById('qSubs').textContent = '—';
+      document.getElementById('qConflict').textContent = '';
       ctx.clearRect(0,0,canvas.width,canvas.height);
       return;
     }
@@ -580,20 +420,16 @@ _HTML = r"""<!doctype html>
     document.getElementById('qStatus').textContent = `${qIndex+1}/${queue.length}`;
     document.getElementById('qId').textContent = it.id;
     document.getElementById('qSha').textContent = it.roi_sha256;
+    document.getElementById('qSubs').textContent = String(it.label_submissions || 0);
+    document.getElementById('qConflict').textContent = it.conflict ? "CONFLICT / NEEDS REVIEW" : "";
 
-    // show compact metadata
     const meta = safeJsonParse(it.metadata_json || '');
-    const metaTxt = meta ? JSON.stringify({
-      model_version: meta.model_version,
-      quality: meta.quality,
-      regions: (meta.regions||[]).map(r=>({name:r.name, bbox:r.bbox})),
-    }, null, 2) : (it.metadata_json || '');
-    document.getElementById('qMeta').textContent = (metaTxt || '').slice(0,800);
+    const metaTxt = meta ? JSON.stringify({regions:(meta.regions||[]).map(r=>({name:r.name, bbox:r.bbox}))}, null, 2) : (it.metadata_json || '');
+    document.getElementById('qMeta').textContent = (metaTxt || '').slice(0,900);
 
-    resetSliders();
+    resetStateForSample(meta);
 
-    // load image (overlay draws on load)
-    document.getElementById('qImg').src = it.image_url;
+    img.src = it.image_url;
   }
 
   async function loadQueue(){
@@ -619,50 +455,68 @@ _HTML = r"""<!doctype html>
     showQueueItem();
   }
 
+  async function openSubmissions(){
+    document.getElementById('qErr').textContent = '';
+    if (!queue.length) return;
+    const it = queue[qIndex];
+    try{
+      const r = await api(`/v1/admin/label-queue/${it.id}/submissions`);
+      const j = await r.json();
+      const out = document.getElementById('subsOut');
+      out.textContent = JSON.stringify(j, null, 2);
+      out.classList.remove('hide');
+    }catch(e){
+      document.getElementById('qErr').textContent = String(e);
+    }
+  }
+
   async function submitLabel(){
-    const err = document.getElementById('qErr');
-    err.textContent = '';
+    document.getElementById('qErr').textContent = '';
     if (!queue.length) return;
     const it = queue[qIndex];
 
-    const labels = {};
-    for (const [k,sid,vid] of sliders){
-      const val = parseInt(document.getElementById(sid).value, 10);
-      if (val > 0) labels[k] = val / 100.0;
-    }
+    // ensure latest slider values saved
+    writeToBucket();
+
+    const labels = labelState.global || {};
+    const region_labels = labelState.regions || {};
     const fitz = document.getElementById('fitz').value || null;
     const age = document.getElementById('age').value || null;
 
     try{
-      await api(`/v1/admin/label-queue/${it.id}/label`, {
+      const r = await api(`/v1/admin/label-queue/${it.id}/label`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({labels, fitzpatrick: fitz, age_band: age})
+        body: JSON.stringify({labels, region_labels, fitzpatrick: fitz, age_band: age})
       });
+      const j = await r.json();
+
+      // remove item if finalized, else keep but advance
+      const finalized = j.finalize && j.finalize.finalized;
       queue.splice(qIndex,1);
       if (qIndex >= queue.length) qIndex = Math.max(0, queue.length-1);
       showQueueItem();
     }catch(e){
-      err.textContent = String(e);
+      document.getElementById('qErr').textContent = String(e);
     }
   }
 
   async function skipLabel(){
-    const err = document.getElementById('qErr');
-    err.textContent = '';
+    document.getElementById('qErr').textContent = '';
     if (!queue.length) return;
     const it = queue[qIndex];
     try{
-      await api(`/v1/admin/label-queue/${it.id}/skip`, {
+      const r = await api(`/v1/admin/label-queue/${it.id}/skip`, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({reason:"admin_skip"})
       });
+      const j = await r.json();
       queue.splice(qIndex,1);
       if (qIndex >= queue.length) qIndex = Math.max(0, queue.length-1);
       showQueueItem();
     }catch(e){
-      err.textContent = String(e);
+      document.getElementById('qErr').textContent = String(e);
     }
   }
 
@@ -686,7 +540,6 @@ _HTML = r"""<!doctype html>
     if (k === 'p' || k === 'P'){ ev.preventDefault(); prevItem(); return; }
     if (k === 'z' || k === 'Z'){ ev.preventDefault(); zoom.focus(); return; }
 
-    // 1-8 focus sliders
     if (k >= '1' && k <= '8'){
       const idx = parseInt(k,10)-1;
       const sid = sliders[idx][1];
@@ -696,7 +549,6 @@ _HTML = r"""<!doctype html>
       return;
     }
 
-    // left/right adjust focused slider
     if (k === 'ArrowLeft' || k === 'ArrowRight'){
       if (!focusedSlider) return;
       ev.preventDefault();
@@ -705,17 +557,17 @@ _HTML = r"""<!doctype html>
       v += (k === 'ArrowRight') ? step : -step;
       v = Math.max(0, Math.min(100, v));
       focusedSlider.value = v;
-      // update its value label
       for (const [ak,sid,vid] of sliders){
         if (sid === focusedSlider.id){
           document.getElementById(vid).textContent = String(v);
           break;
         }
       }
+      writeToBucket();
     }
   });
 
-  // -------- Auto-detect session --------
+  // Auto-detect session
   (async ()=>{
     try{
       const r = await api('/v1/admin/auth/me');
@@ -724,17 +576,13 @@ _HTML = r"""<!doctype html>
         me = j;
         csrf = j.csrf_token;
         document.getElementById('who').textContent = `Signed in: ${j.email} (${j.role})`;
-        document.getElementById('twofaStatus').innerHTML = j.totp_enabled ? '<span class="ok">enabled</span>' : '<span class="badc">disabled</span>';
-
         document.getElementById('loginPanel').classList.add('hide');
         document.getElementById('dash').classList.remove('hide');
         document.getElementById('btnRefresh').classList.remove('hide');
         document.getElementById('btnLogout').classList.remove('hide');
         await refreshAll();
       }
-    }catch(e){
-      // not logged in
-    }
+    }catch(e){}
   })();
 </script>
 </body>
