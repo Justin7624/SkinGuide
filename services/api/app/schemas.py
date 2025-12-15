@@ -1,50 +1,67 @@
-import os
-import json
-from sqlalchemy.orm import Session as OrmSession
-from .config import settings
-from . import models
+# services/api/app/schemas.py
 
-def _safe_mkdir(path: str):
-    os.makedirs(path, exist_ok=True)
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
 
-def store_roi_donation(
-    db: OrmSession,
-    session_id: str,
-    roi_sha256: str,
-    roi_bytes: bytes,
-    metadata: dict,
-) -> tuple[bool, str]:
-    """
-    Stores ROI-only donation if enabled. Dedupes by roi_sha256.
-    Returns (stored, reason).
-    """
-    if not settings.DONATION_STORAGE_ENABLED:
-        return (False, "donation_storage_disabled")
+AttributeKey = Literal[
+    "uneven_tone_appearance",
+    "hyperpigmentation_appearance",
+    "redness_appearance",
+    "texture_roughness_appearance",
+    "shine_oiliness_appearance",
+    "pore_visibility_appearance",
+    "fine_lines_appearance",
+    "dryness_flaking_appearance",
+]
 
-    if not roi_sha256 or not roi_bytes:
-        return (False, "missing_roi")
+RegionName = Literal["forehead", "left_cheek", "right_cheek", "nose", "chin"]
 
-    # Dedupe
-    existing = db.query(models.DonatedSample).filter(models.DonatedSample.roi_sha256 == roi_sha256).first()
-    if existing:
-        return (False, "duplicate")
+class AttributeScore(BaseModel):
+    key: AttributeKey
+    score: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0)
 
-    # Sharded directory (avoid huge single folder)
-    shard = roi_sha256[:2]
-    dirpath = os.path.join(settings.DONATION_STORE_DIR, shard)
-    _safe_mkdir(dirpath)
+class QualityReport(BaseModel):
+    lighting: Literal["ok", "low", "harsh"]
+    blur: Literal["low", "medium", "high"]
+    angle: Literal["ok", "bad"]
+    makeup_suspected: bool = False
 
-    fpath = os.path.join(dirpath, f"{roi_sha256}.jpg")
-    if not os.path.exists(fpath):
-        with open(fpath, "wb") as f:
-            f.write(roi_bytes)
+class BBox(BaseModel):
+    x: int
+    y: int
+    w: int
+    h: int
 
-    rec = models.DonatedSample(
-        session_id=session_id,
-        roi_sha256=roi_sha256,
-        roi_image_path=fpath,
-        metadata_json=json.dumps(metadata, ensure_ascii=False),
-    )
-    db.add(rec)
-    db.commit()
-    return (True, "stored")
+class RegionResult(BaseModel):
+    name: RegionName
+    bbox: BBox
+    skin_pixels: int = Field(ge=0)
+    quality: QualityReport
+    attributes: List[AttributeScore] = Field(default_factory=list)
+    status: Literal["ok", "insufficient_skin"] = "ok"
+
+class AnalyzeResponse(BaseModel):
+    disclaimer: str
+    quality: QualityReport
+    attributes: List[AttributeScore]
+    regions: List[RegionResult] = Field(default_factory=list)
+    routine: dict
+    professional_to_discuss: List[str]
+    when_to_seek_care: List[str]
+    model_version: str
+    stored_for_progress: bool = False
+
+class ConsentUpsert(BaseModel):
+    store_progress_images: bool
+    donate_for_improvement: bool
+
+class SessionCreateResponse(BaseModel):
+    session_id: str
+    store_images_default: bool
+
+class DonateResponse(BaseModel):
+    ok: bool
+    stored: bool
+    reason: Optional[str] = None
+    roi_sha256: Optional[str] = None
