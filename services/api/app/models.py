@@ -1,6 +1,8 @@
 # services/api/app/models.py
 
-from sqlalchemy import String, Boolean, DateTime, Integer, ForeignKey, Text
+from sqlalchemy import (
+    String, Boolean, DateTime, Integer, ForeignKey, Text, Float
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 from .db import Base
@@ -60,7 +62,6 @@ class DonatedSample(Base):
     roi_image_path: Mapped[str] = mapped_column(String)
     metadata_json: Mapped[str] = mapped_column(Text)
 
-    # FINAL consensus output (trainer consumes this)
     labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     labeled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -107,10 +108,8 @@ class AuditEvent(Base):
 
     event_type: Mapped[str] = mapped_column(String, index=True)
 
-    # End-user session (if applicable)
     session_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
-    # Request meta
     request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -119,8 +118,7 @@ class AuditEvent(Base):
     method: Mapped[str | None] = mapped_column(String, nullable=True)
     status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # Actor meta (hardened)
-    actor_type: Mapped[str | None] = mapped_column(String, nullable=True, index=True)  # "admin" | "user"
+    actor_type: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     admin_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     admin_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
@@ -138,17 +136,15 @@ class AdminUser(Base):
     email: Mapped[str] = mapped_column(String, unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String)
 
-    # roles: "viewer" (read-only), "labeler" (label queue), "admin" (full)
     role: Mapped[str] = mapped_column(String, default="viewer", index=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    # 2FA (TOTP)
-    totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)   # base32
+    totp_secret: Mapped[str | None] = mapped_column(String, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    recovery_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # hashed codes list
+    recovery_codes_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     sessions: Mapped[list["AdminSession"]] = relationship(back_populates="user")
     resets: Mapped[list["AdminPasswordReset"]] = relationship(back_populates="user")
@@ -207,7 +203,6 @@ class DonatedSampleLabel(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    # Quick filter for skip vs label
     is_skip: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     labels_json: Mapped[str] = mapped_column(Text)
@@ -228,16 +223,38 @@ class ConsensusArtifact(Base):
     donated_sample_id: Mapped[int] = mapped_column(Integer, ForeignKey("donated_samples.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
-    status: Mapped[str] = mapped_column(String, index=True)  # e.g., "finalized", "needs_more", "escalated", "conflict", "skipped_final"
+    status: Mapped[str] = mapped_column(String, index=True)
     algorithm: Mapped[str] = mapped_column(String, default="median/mean_consensus", index=True)
 
-    # who triggered the attempt (if admin action)
     computed_by_admin_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     computed_by_admin_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     request_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
-    # the full structured artifact json for forensic/debug
     artifact_json: Mapped[str] = mapped_column(Text)
 
     donated_sample: Mapped["DonatedSample"] = relationship(back_populates="consensus_artifacts")
+
+
+# --------------------------
+# Labeler reliability snapshots (nightly)
+# --------------------------
+
+class LabelerReliabilitySnapshot(Base):
+    __tablename__ = "labeler_reliability_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+    window_days: Mapped[int] = mapped_column(Integer, default=180, index=True)
+
+    admin_user_id: Mapped[int] = mapped_column(Integer, ForeignKey("admin_users.id"), index=True)
+    admin_email: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+
+    n_samples: Mapped[int] = mapped_column(Integer, default=0)
+
+    mean_abs_error: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reliability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    details_json: Mapped[str | None] = mapped_column(Text, nullable=True)
