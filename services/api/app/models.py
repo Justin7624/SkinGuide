@@ -19,7 +19,6 @@ class Consent(Base):
     __tablename__ = "consents"
     session_id: Mapped[str] = mapped_column(String, ForeignKey("sessions.id"), primary_key=True)
 
-    # Default false. Explicit opt-in required.
     store_progress_images: Mapped[bool] = mapped_column(Boolean, default=False)
     donate_for_improvement: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -34,10 +33,7 @@ class ProgressEntry(Base):
     session_id: Mapped[str] = mapped_column(String, ForeignKey("sessions.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-    # Stored only if user opted in AND storage enabled server-side
     roi_image_path: Mapped[str | None] = mapped_column(String, nullable=True)
-
-    # JSON string to keep it simple in MVP
     result_json: Mapped[str] = mapped_column(Text)
 
     session: Mapped["Session"] = relationship(back_populates="progress")
@@ -45,9 +41,8 @@ class ProgressEntry(Base):
 
 class DonatedSample(Base):
     """
-    ROI-only donation, consent-gated.
-    Stores only a cropped/masked ROI (no full selfie), plus minimal metadata.
-    Deduped by roi_sha256.
+    ROI-only donation, consent-gated. Deduped by roi_sha256.
+    Stores minimal metadata + optional labels.
     """
     __tablename__ = "donated_samples"
 
@@ -58,7 +53,10 @@ class DonatedSample(Base):
     roi_sha256: Mapped[str] = mapped_column(String, unique=True, index=True)
     roi_image_path: Mapped[str] = mapped_column(String)
 
-    # minimal metadata JSON (quality + attribute scores + model_version etc)
     metadata_json: Mapped[str] = mapped_column(Text)
+
+    # NEW: labeling for training (sparse labels allowed)
+    labels_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    labeled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     session: Mapped["Session"] = relationship(back_populates="donations")
