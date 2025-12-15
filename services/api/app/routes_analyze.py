@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import math
 import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, List
@@ -21,7 +20,6 @@ from .db import get_db
 from . import models
 from .ml.model_manager import MODEL_MANAGER
 
-# torchvision is used for resizing + tensor conversion to match model_manager expectations
 try:
     import torch
     from torchvision import transforms
@@ -31,45 +29,28 @@ except Exception as e:
 router = APIRouter(prefix="/v1/analyze", tags=["analyze"])
 
 
-# -----------------------------
-# Public response models
-# -----------------------------
-
 class AnalyzeResponse(BaseModel):
     ok: bool = True
 
-    inference_source: str = Field(
-        description="model|heuristics",
-        examples=["model", "heuristics"],
-    )
-    active_model_version: Optional[str] = Field(
-        default=None,
-        description="Version string of active model if using model inference; None if heuristics fallback."
-    )
-    model_active: bool = Field(default=False)
+    inference_source: str = Field(description="model|heuristics")
+    active_model_version: Optional[str] = None
+    model_active: bool = False
 
-    # ROI
-    roi: dict = Field(default_factory=dict, description="ROI extraction output + geometry")
-    regions: dict = Field(default_factory=dict, description="Region breakdown and optional polygons/rectangles")
+    deployment: dict = Field(default_factory=dict, description="Stable/canary deployment info (if available)")
 
-    # Scores
+    roi: dict = Field(default_factory=dict)
+    regions: dict = Field(default_factory=dict)
+
     global_scores: Dict[str, float] = Field(default_factory=dict)
     region_scores: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
-    # Guidance layer
     top_concerns: List[dict] = Field(default_factory=list)
     recommendations: List[dict] = Field(default_factory=list)
 
-    # Safety/disclaimer
-    disclaimer: str = Field(default="This tool provides cosmetic/appearance guidance only and is not a medical diagnosis.")
+    disclaimer: str = "This tool provides cosmetic/appearance guidance only and is not a medical diagnosis."
 
-
-# -----------------------------
-# Utilities
-# -----------------------------
 
 def _now_iso() -> str:
-    # avoid datetime import churn; consistent enough for logging payloads
     import datetime
     return datetime.datetime.utcnow().isoformat() + "Z"
 
@@ -117,16 +98,10 @@ def _clamp01(x: float) -> float:
     return 0.0 if x < 0.0 else 1.0 if x > 1.0 else x
 
 
-# -----------------------------
-# ROI extraction + Regions
-# -----------------------------
-# We attempt to use mediapipe face mesh if available.
-# If not available, we fallback to a robust center-crop ROI heuristic.
-
 @dataclass
 class ROIResult:
     roi_image: Image.Image
-    roi_box_xyxy: Tuple[int, int, int, int]  # x1,y1,x2,y2 in original image coords
+    roi_box_xyxy: Tuple[int, int, int, int]
     face_found: bool
     method: str
     debug: Dict[str, Any]
@@ -144,17 +119,15 @@ def _extract_roi(img: Image.Image) -> ROIResult:
     w, h = img.size
     mp = _try_import_mediapipe()
 
-    # -------- mediapipe path (best) --------
     if mp is not None:
         try:
             import cv2  # type: ignore
 
-            np_img = np.array(img)[:, :, ::-1]  # RGB->BGR
+            np_img = np.array(img)[:, :, ::-1]
             mp_face = mp.solutions.face_detection
             with mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5) as fd:
                 res = fd.process(np_img)
                 if res.detections:
-                    # take most confident
                     det = sorted(res.detections, key=lambda d: d.score[0], reverse=True)[0]
                     box = det.location_data.relative_bounding_box
                     x1 = int(max(0, box.xmin * w))
@@ -162,7 +135,6 @@ def _extract_roi(img: Image.Image) -> ROIResult:
                     x2 = int(min(w, (box.xmin + box.width) * w))
                     y2 = int(min(h, (box.ymin + box.height) * h))
 
-                    # expand box a bit to include forehead/chin
                     bw = x2 - x1
                     bh = y2 - y1
                     pad_x = int(bw * 0.20)
@@ -182,16 +154,13 @@ def _extract_roi(img: Image.Image) -> ROIResult:
                         method="mediapipe_face_detection",
                         debug={"score": float(det.score[0])},
                     )
-        except Exception as e:
-            # fall through to heuristic
+        except Exception:
             pass
 
-    # -------- heuristic fallback --------
-    # Use a central crop that biases upward (more forehead), common for selfies.
     crop_w = int(w * 0.70)
     crop_h = int(h * 0.70)
     cx = w // 2
-    cy = int(h * 0.42)  # slightly above center
+    cy = int(h * 0.42)
     x1 = max(0, cx - crop_w // 2)
     y1 = max(0, cy - crop_h // 2)
     x2 = min(w, x1 + crop_w)
@@ -208,13 +177,8 @@ def _extract_roi(img: Image.Image) -> ROIResult:
 
 
 def _compute_regions(roi: ROIResult) -> Dict[str, Any]:
-    """
-    Region breakdown returns rectangles relative to ROI image coordinates.
-    If mediapipe face mesh is available, you can later upgrade this to polygon masks.
-    """
     rw, rh = roi.roi_image.size
 
-    # Conservative "facial region" boxes (percent-based)
     def rect(px1, py1, px2, py2):
         return {
             "x1": int(px1 * rw),
@@ -240,27 +204,15 @@ def _compute_regions(roi: ROIResult) -> Dict[str, Any]:
     }
 
 
-# -----------------------------
-# Heuristics fallback (no ML)
-# -----------------------------
-
 def _heuristic_scores_from_roi(roi_img: Image.Image) -> Dict[str, float]:
-    """
-    IMPORTANT:
-    These are *non-clinical heuristics* only, used when no model is active.
-    Scores are 0..1, where higher means "more likely noticeable".
-    """
     img = _to_rgb_pil(roi_img).resize((256, 256))
     a = np.asarray(img).astype(np.float32) / 255.0
 
-    # Convert to simple channels
     r = a[:, :, 0]
     g = a[:, :, 1]
     b = a[:, :, 2]
     lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
 
-    # Texture proxy: Laplacian variance (higher => more texture / sharper edges)
-    # implement laplacian with simple finite differences to avoid cv2 dependency
     lap = (
         -4 * lum
         + np.roll(lum, 1, axis=0)
@@ -271,40 +223,30 @@ def _heuristic_scores_from_roi(roi_img: Image.Image) -> Dict[str, float]:
     texture = float(np.var(lap))
     texture_score = _clamp01((texture - 0.0003) / (0.0020 - 0.0003 + 1e-9))
 
-    # Redness proxy: r-g contrast
     redness = float(np.mean(np.clip(r - g, 0, 1)))
     redness_score = _clamp01((redness - 0.02) / (0.10 - 0.02 + 1e-9))
 
-    # Hyperpigmentation proxy: local contrast / chroma variability
     chroma = np.sqrt((r - g) ** 2 + (g - b) ** 2 + (b - r) ** 2)
     chroma_var = float(np.var(chroma))
     pigment_score = _clamp01((chroma_var - 0.002) / (0.020 - 0.002 + 1e-9))
 
-    # Oiliness proxy: highlight percentage
     highlights = float(np.mean(lum > 0.85))
     oil_score = _clamp01((highlights - 0.02) / (0.18 - 0.02 + 1e-9))
 
-    # Under-eye darkness proxy (very rough): darker lower-mid band
     lower = lum[int(256 * 0.30): int(256 * 0.55), :]
     under_eye_dark = float(1.0 - np.mean(lower))
     under_eye_score = _clamp01((under_eye_dark - 0.35) / (0.60 - 0.35 + 1e-9))
 
     return {
-        # Global-ish concerns
         "g:hyperpigmentation": pigment_score,
         "g:redness": redness_score,
         "g:texture": texture_score,
         "g:oiliness": oil_score,
         "g:under_eye_darkness": under_eye_score,
-        # A couple common "labels" people expect
         "g:acne_prone": _clamp01((oil_score * 0.6) + (texture_score * 0.4)),
         "g:photoaging": _clamp01((pigment_score * 0.55) + (texture_score * 0.45)),
     }
 
-
-# -----------------------------
-# Parsing model outputs
-# -----------------------------
 
 def _split_predictions(pred: Dict[str, float]) -> Tuple[Dict[str, float], Dict[str, Dict[str, float]]]:
     global_scores: Dict[str, float] = {}
@@ -314,25 +256,18 @@ def _split_predictions(pred: Dict[str, float]) -> Tuple[Dict[str, float], Dict[s
         if k.startswith("g:"):
             global_scores[k[2:]] = float(v)
         elif k.startswith("r:"):
-            # r:region:attr
             parts = k.split(":", 2)
             if len(parts) == 3:
                 region = parts[1]
                 attr = parts[2]
                 region_scores.setdefault(region, {})[attr] = float(v)
 
-    # sort keys deterministically
     global_scores = dict(sorted(global_scores.items(), key=lambda kv: kv[0]))
     for r in list(region_scores.keys()):
         region_scores[r] = dict(sorted(region_scores[r].items(), key=lambda kv: kv[0]))
     region_scores = dict(sorted(region_scores.items(), key=lambda kv: kv[0]))
-
     return global_scores, region_scores
 
-
-# -----------------------------
-# Recommendation rules (safe, non-prescriptive)
-# -----------------------------
 
 def _topk(scores: Dict[str, float], k: int = 5, min_score: float = 0.25) -> List[Tuple[str, float]]:
     items = [(a, float(s)) for a, s in scores.items()]
@@ -343,11 +278,9 @@ def _topk(scores: Dict[str, float], k: int = 5, min_score: float = 0.25) -> List
 
 def _recommendations_from_scores(global_scores: Dict[str, float]) -> Tuple[List[dict], List[dict]]:
     concerns = _topk(global_scores, k=6, min_score=0.25)
-
     top_concerns = [{"concern": c, "score": round(s, 4)} for c, s in concerns]
 
     recs: List[dict] = []
-    # Baseline “safe” skin guidance buckets
     if any(c in ("hyperpigmentation", "photoaging") for c, _ in concerns):
         recs.append({
             "category": "Daily routine",
@@ -421,22 +354,13 @@ def _recommendations_from_scores(global_scores: Dict[str, float]) -> Tuple[List[
     return top_concerns, recs
 
 
-# -----------------------------
-# Session helpers (optional persistence)
-# -----------------------------
-
 def _get_or_create_session(db: OrmSession, request: Request) -> models.Session:
-    """
-    Lightweight session creation so analyze can attach progress/donations.
-    If the client supplies X-Session-Id we reuse it; otherwise create one.
-    """
     sid = request.headers.get("X-Session-Id")
     if sid:
         s = db.get(models.Session, sid)
         if s:
             return s
 
-    # create new
     import uuid
     sid = str(uuid.uuid4())
     s = models.Session(id=sid)
@@ -450,24 +374,17 @@ def _get_consent(db: OrmSession, session_id: str) -> Optional[models.Consent]:
     return db.get(models.Consent, session_id)
 
 
-# -----------------------------
-# Core endpoint
-# -----------------------------
-
 @router.post("", response_model=AnalyzeResponse)
 async def analyze_face(
     request: Request,
     image: UploadFile = File(...),
     db: OrmSession = Depends(get_db),
 ):
-    # 1) session + consent
     session = _get_or_create_session(db, request)
     consent = _get_consent(db, session.id)
 
-    # 2) load image
     pil = _load_upload_as_pil(image)
 
-    # 3) ROI extraction
     roi = _extract_roi(pil)
     roi_img = roi.roi_image
     roi_jpeg = _pil_to_jpeg_bytes(roi_img)
@@ -475,59 +392,80 @@ async def analyze_face(
 
     regions = _compute_regions(roi)
 
-    # 4) Try model inference; otherwise fallback to heuristics
     inference_source = "heuristics"
-    active_version: Optional[str] = None
+    model_version_used: Optional[str] = None
     model_active = False
+    deployment_info: Dict[str, Any] = {}
 
     global_scores: Dict[str, float] = {}
     region_scores: Dict[str, Dict[str, float]] = {}
 
-    # Preprocess for model
+    # Attempt model inference (stable/canary selected by session hash)
     try:
-        active_version = MODEL_MANAGER.ensure_current()
-        if active_version:
-            model_active = True
-            inference_source = "model"
+        snap = MODEL_MANAGER.ensure_current()
+        deployment_info = dict(snap)
 
-            # Match model_manager expectations: resize to active manifest image_size
+        # If no stable model exists, choose_version_for_session returns None and we fall back
+        chosen = MODEL_MANAGER.choose_version_for_session(session.id)
+        if chosen:
+            # Build tensor to match the chosen model's image size:
+            # ModelManager exposes size via predict_tensor_for_session info; we can do a quick call
+            # BUT we must preprocess before calling. We'll use stable size if loaded, else 224.
+            # Safer: use manager.active_info to pick stable/canary loaded size if available.
             info = MODEL_MANAGER.active_info()
-            img_size = int(info.get("image_size") or 224)
+            # select size based on whether chosen is canary or stable (loaded)
+            img_size = 224
+            if info.get("stable") and info["stable"].get("version") == chosen:
+                img_size = int(info["stable"].get("image_size") or 224)
+            elif info.get("canary") and info["canary"].get("version") == chosen:
+                img_size = int(info["canary"].get("image_size") or 224)
+            else:
+                # fallback
+                img_size = 224
 
             tf = transforms.Compose([
                 transforms.Resize((img_size, img_size)),
-                transforms.ToTensor(),  # float32 0..1
+                transforms.ToTensor(),
             ])
-            x = tf(_to_rgb_pil(roi_img)).unsqueeze(0)  # [1,3,H,W]
+            x = tf(_to_rgb_pil(roi_img)).unsqueeze(0)
 
-            pred = MODEL_MANAGER.predict_tensor(x)
+            pred, inf = MODEL_MANAGER.predict_tensor_for_session(session.id, x)
+            model_version_used = inf.get("version_used")
+            model_active = True
+            inference_source = "model"
+
+            # include richer deployment info
+            deployment_info = {
+                "stable_version": inf.get("stable_version"),
+                "canary_version": inf.get("canary_version"),
+                "canary_percent": inf.get("canary_percent"),
+                "deployment_enabled": inf.get("deployment_enabled"),
+                "version_used": inf.get("version_used"),
+            }
+
             global_scores, region_scores = _split_predictions(pred)
-
         else:
-            # no active model => heuristics fallback
             hs = _heuristic_scores_from_roi(roi_img)
             global_scores, region_scores = _split_predictions(hs)
 
     except Exception:
-        # model load/predict failure => heuristics fallback
-        inference_source = "heuristics"
-        active_version = None
-        model_active = False
+        # Any model errors => heuristics
         hs = _heuristic_scores_from_roi(roi_img)
         global_scores, region_scores = _split_predictions(hs)
+        inference_source = "heuristics"
+        model_version_used = None
+        model_active = False
 
-    # 5) Guidance layer
     top_concerns, recs = _recommendations_from_scores(global_scores)
 
-    # 6) Optional persistence:
-    #    - progress entries store results (and optionally ROI) if user consented
-    #    - donation pipeline stores ROI for labeling/training only if user consented
+    # Optional persistence
     try:
         result_payload = {
             "ts": _now_iso(),
             "inference_source": inference_source,
-            "active_model_version": active_version,
+            "active_model_version": model_version_used,
             "model_active": model_active,
+            "deployment": deployment_info,
             "roi": {
                 "face_found": roi.face_found,
                 "method": roi.method,
@@ -541,9 +479,7 @@ async def analyze_face(
             "recommendations": recs,
         }
 
-        # store progress entry if enabled
         if consent and consent.store_progress_images:
-            # store ROI image locally under uploads/progress/{session}/{sha}.jpg
             base_dir = os.environ.get("UPLOAD_DIR", "uploads")
             out_dir = os.path.join(base_dir, "progress", session.id)
             os.makedirs(out_dir, exist_ok=True)
@@ -560,9 +496,7 @@ async def analyze_face(
             db.add(pe)
             db.commit()
 
-        # donate sample if enabled
         if consent and consent.donate_for_improvement:
-            # avoid duplicates by sha
             existing = (
                 db.query(models.DonatedSample)
                 .filter(models.DonatedSample.roi_sha256 == roi_sha)
@@ -583,7 +517,6 @@ async def analyze_face(
                     "roi_method": roi.method,
                     "face_found": roi.face_found,
                     "regions": regions,
-                    # minimal capture; avoid sensitive info
                     "img_size": {"w": pil.size[0], "h": pil.size[1]},
                 }
 
@@ -597,15 +530,14 @@ async def analyze_face(
                 db.commit()
 
     except Exception:
-        # persistence should never break analysis
         pass
 
-    # 7) return response (ALWAYS includes model version field)
     return AnalyzeResponse(
         ok=True,
         inference_source=inference_source,
-        active_model_version=active_version,
+        active_model_version=model_version_used,  # always present when model is used
         model_active=model_active,
+        deployment=deployment_info,
         roi={
             "face_found": roi.face_found,
             "method": roi.method,
